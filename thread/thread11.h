@@ -25,12 +25,10 @@ limitations under the License.
 #include <photon/common/callback.h>
 
 namespace photon {
-    template<  typename F, typename SavedArgs>
+    template<typename Pair>
     static void* __stub11(void*) {
-        using Pair = std::pair<F, SavedArgs>;
         auto p = thread_reserved_space<Pair>(CURRENT);
         //tuple_assistance::apply(p->first, p->second);//compile failed on gcc 11.3/clang 14 
-        //tuple_assistance::apply(p->first, SavedArgs{std::move(p->second)});
         tuple_assistance::apply(std::move(p->first), std::move(p->second));
         return nullptr;
     }
@@ -42,7 +40,7 @@ namespace photon {
     thread* __thread_create11(uint64_t stack_size, F&& f, ARGUMENTS&&...args) {
         using Pair = std::pair<F, SavedArgs>;
         static_assert(sizeof(Pair) < UINT16_MAX, "...");
-        auto th = thread_create(&__stub11<F, SavedArgs>, nullptr, stack_size, sizeof(Pair));
+        auto th = thread_create(&__stub11<Pair>, nullptr, stack_size, sizeof(Pair));
         auto p  = thread_reserved_space<Pair>(th);
         new (p) Pair{std::forward<F>(f), SavedArgs{std::forward<ARGUMENTS>(args)...}};
         return th;
