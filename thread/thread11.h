@@ -30,7 +30,8 @@ namespace photon {
         using Pair = std::pair<F, SavedArgs>;
         auto p = thread_reserved_space<Pair>(CURRENT);
         //tuple_assistance::apply(p->first, p->second);//compile failed on gcc 11.3/clang 14 
-        tuple_assistance::apply(p->first, SavedArgs{std::move(p->second)});
+        //tuple_assistance::apply(p->first, SavedArgs{std::move(p->second)});
+        tuple_assistance::apply(std::move(p->first), std::move(p->second));
         return nullptr;
     }
 
