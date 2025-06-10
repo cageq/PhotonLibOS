@@ -16,12 +16,13 @@ limitations under the License.
 
 #include <vector>
 #include <time.h>
-
+#include <memory>
 #include "client.h"
 #include "parser.h"
 #include <photon/common/string-keyed.h>
 #include <photon/common/estring.h>
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 
 namespace photon {
 namespace net {
@@ -29,76 +30,121 @@ namespace http {
 
 using namespace std;
 
-static uint64_t local_gmt_gap_us = 0;
-uint64_t time_gmt_to_local(uint64_t local_now) {
-    if (local_gmt_gap_us == 0) {
-        time_t now = time(nullptr);
-        tm* gmt = gmtime(&now);
-        auto now_s = mktime(gmt);
-        local_gmt_gap_us = (now - now_s) * 1000 * 1000;
+struct CookieItem{
+    uint64_t expire;
+    unique_ptr<char[]> _contents;
+    rstring_view16 value, Domain, Path;
+    bool HttpOnly, Partitioned, Secure;
+    char SameSite;
+    estring_view get_value()  { return value  | _contents.get(); }
+    estring_view get_domain() { return Domain | _contents.get(); }
+    estring_view get_path()   { return Path   | _contents.get(); }
+    void set_contents(estring_view val, estring_view domain,
+                                        estring_view path) {
+        uint16_t vl = (uint16_t)val.size(),
+                 dl = (uint16_t)domain.size(),
+                 pl = (uint16_t)path.size();
+        auto ptr = new char[0ULL + vl + dl + pl];
+        memcpy(ptr, val.data(), vl);
+        memcpy(ptr + vl, domain.data(), dl);
+        memcpy(ptr + vl + dl, path.data(), pl);
+        _contents.reset(ptr);
+        Path   = {(uint16_t)(vl + dl), pl};
+        Domain = {vl, dl};
+        value  = {0, vl};
     }
-    return local_now + local_gmt_gap_us;
-}
-
-static uint64_t date_to_stamp(const string& date) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    strptime(date.data(), "%a, %d %b %Y %H:%M:%S", &tm);
-    return time_gmt_to_local(mktime(&tm) * 1000 * 1000);
-}
-
-struct SimpleValue{
-    uint64_t m_expire;
-    string m_value;
 };
 
 class SimpleCookie {
 public:
-    unordered_map_string_key<SimpleValue> m_kv;
+    unordered_map_string_key<CookieItem> m_cookies;
     int get_cookies_from_headers(Message* message)  {
-        auto it = message->headers.find("Set-Cookies");
-        while (it != message->headers.end() && it.first() == "Set-Cookies") {
-            LOG_INFO("get cookie");
+        auto r = message->headers.equal_range("Set-Cookie");
+        for (auto it = r.first; it != r.second; ++it) {
             auto Cookies = it.second();
             Parser p(Cookies);
-            uint64_t expire = -1UL;
-            p.skip_string("__Host-");
-            p.skip_string("__Secure-");
             auto key = Cookies | p.extract_until_char('=');
-            if (key.size() == 0) return -1;
-            p.skip_chars('=');
+            if (key.size() == 0) continue;
             auto value = Cookies | p.extract_until_char(';');
-            p.skip_until_string("Expires=");
-            if (!p.is_done()) {
-                p.skip_string("Expires=");
-                auto date = Cookies | p.extract_until_char(';');
-                expire = date_to_stamp(date);
+            if (value.size() == 0) continue;
+            p.skip_spaces();
+            bool HttpOnly = false;
+            bool Partitioned = false;
+            bool Secure = false;
+            char SameSite = 0;
+            uint64_t expire = -1ULL;
+            estring_view Path, Domain;
+            while(!p.is_done()) {
+                auto attr = Cookies | p.extract_until_char(';');
+                p.skip_spaces();
+                Parser ap(attr);
+                auto k2 = attr | ap.extract_until_char('=');
+                auto v2 = attr | ap.extract_until_char('\0');
+                if (k2 == "Max-Age") {
+                    if (uint64_t age = v2.to_uint64()) expire = time(0) + age;
+                    else LOG_DEBUG("invalid integer format for 'Max-Age': ", v2);
+                } else if (k2 == "Expires") {
+                    struct tm tm;
+                    auto ok = strptime(v2.data(), "%a, %d %b %Y %H:%M:%S", &tm);
+                    if (!ok) LOG_DEBUG("invalid time format for 'Expires': ", v2);
+                    else expire = mktime(&tm);
+                }
+                else if (k2 == "SameSite" && v2.size() > 0) SameSite = v2[0];
+                else if (k2 == "Path") Path = v2;
+                else if (k2 == "Domain") Domain = v2;
+                else if (k2 == "Secure") Secure = true;
+                else if (k2 == "HttpOnly") HttpOnly = true;
+                else if (k2 == "Partitioned") Partitioned = true;
+                else LOG_DEBUG("unknown cookie attribute ", attr);
             }
-            m_kv[key] = {expire, value};
-            ++it;
+            #define LOG_DEBUG_CONTINUE(...) { LOG_DEBUG(__VA_ARGS__); continue; }
+            if (!Secure) {
+                if (Partitioned)
+                    LOG_DEBUG_CONTINUE(VALUE(Secure), VALUE(Partitioned));
+                if (key.starts_with("__Secure-"))
+                    LOG_DEBUG_CONTINUE(VALUE(Secure), VALUE(key));
+                if (key.starts_with("__Host-") && (!Domain.empty() || Path != '/'))
+                    LOG_DEBUG_CONTINUE(VALUE(Secure), VALUE(key), VALUE(Domain), VALUE(Path));
+            }
+            auto& cookie = m_cookies[key];
+            if (value  != cookie.get_value() || Domain != cookie.get_domain() ||
+                Path   != cookie.get_path()) cookie.set_contents(value, Domain, Path);
+            cookie.expire      = expire;
+            cookie.HttpOnly    = HttpOnly;
+            cookie.Partitioned = Partitioned;
+            cookie.Secure      = Secure;
+            cookie.SameSite    = SameSite;
         }
         return 0;
     }
 
+    bool starts_with(std::string_view s, std::string_view x) {
+        return estring_view(s).starts_with(x);
+    }
     int set_cookies_to_headers(Request* request) {
-        bool first_kv = true;
-        vector<string_view> eliminate;
-        if (request->headers.insert("Cookie", "") != 0) return -1;
-        for (auto& it : m_kv) {
-            if (it.second.m_expire <= photon::now) {
-                eliminate.emplace_back(it.first);
+        uint64_t now = time(0);
+        auto& h = request->headers;
+        for (auto it = m_cookies.begin(); it != m_cookies.end(); ) {
+            if (now > it->second.expire) {
+                it = m_cookies.erase(it);
                 continue;
             }
-            if (!first_kv) {
-                if (!request->headers.value_append("; ")) return -1;
-            } else first_kv = false;
-            if (!request->headers.value_append(it.first) ||
-                !request->headers.value_append("=") ||
-                !request->headers.value_append(it.second.m_value))
-                return -1;
-        }
-        for (auto key : eliminate) {
-            m_kv.erase(key);
+            DEFER(++it);
+            if (!request->secure() && starts_with(it->first, "__Secure-")) continue;
+            if (!starts_with(request->abs_path(), it->second.get_path())) continue;
+            auto d = it->second.get_domain();
+            if (!d.empty() && d != request->host()) continue;
+            size_t size = it->first.size() + 1 + it->second.value.size();
+            if (it == m_cookies.begin()) {
+                if (h.space_remain() < size + 10+6) return -1;
+                h.insert("Cookie", "");
+            } else {
+                if (h.space_remain() < size + 2+6) return -1;
+                h.value_append("; ");
+            }
+            h.value_append(it->first);
+            h.value_append("=");
+            h.value_append(it->second.get_value());
         }
         return 0;
     }

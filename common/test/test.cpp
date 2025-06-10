@@ -17,6 +17,7 @@ limitations under the License.
 #define protected public
 #define private public
 
+#include "../unordered_inline_set.h"
 #include "../generator.h"
 #include "../estring.h"
 #include "../alog.cpp"
@@ -44,13 +45,16 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
+#include <string.h>
 //#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
 //#include <malloc.h>
 #ifndef __clang__
 #include <gnu/libc-version.h>
 #endif
+#include "../../test/gtest.h"
+
+#include "../../test/ci-tools.h"
+
 
 using namespace std;
 
@@ -58,13 +62,13 @@ char str[] = "2018/01/05 21:53:28|DEBUG| 2423423|test.cpp:254|virtual void LOGPe
 
 TEST(ring, round_up_to_exp2)
 {
-    EXPECT_EQ(RingBase::round_up_to_exp2(0), 1);
-    EXPECT_EQ(RingBase::round_up_to_exp2(1), 1);
+    EXPECT_EQ(round_up_to_exp2(0), 1);
+    EXPECT_EQ(round_up_to_exp2(1), 1);
 
     uint32_t i = 2;
     for (uint32_t exp2 = 2; exp2 <= (1<<25); exp2 *= 2)
         for ((void)i; i <= exp2; ++i)
-            EXPECT_EQ(RingBase::round_up_to_exp2(i), exp2);
+            EXPECT_EQ(round_up_to_exp2(i), exp2);
 }
 
 int rq_step = 0;
@@ -244,7 +248,12 @@ TEST(Callback, virtual_function)
     Callback<int> dd(lambda);
 //    Callback<int> ee([&](int x){ return RET + x/2; });
 
+#pragma GCC diagnostic push
+#if __GNUC__ >= 12
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
     THIS = (BB*)&c;
+#pragma GCC diagnostic pop
     LOG_DEBUG(VALUE(THIS), VALUE(&c));
 
     for (int i=0; i<100; ++i)
@@ -500,7 +509,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.sum(), 0);
     EXPECT_TRUE(iov.empty());
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
     EXPECT_EQ(iov.begin(), iov.iovec());
 
     iovec v{nullptr, 33}, v2{nullptr, 44};
@@ -516,7 +525,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 3);
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
     EXPECT_EQ(iov.sum(), 44+55+33);
 
     iov.push_back(77);
@@ -531,7 +540,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 6);
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve - 3);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve - 3);
     EXPECT_EQ(iov.sum(), 44+55+33 + 77+44+33);
 
     EXPECT_EQ(iov.pop_front(), 44);
@@ -872,11 +881,19 @@ TEST(estring, test)
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
-    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
-    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+    EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
+    EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
+    
+    estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
+    estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";
+    EXPECT_EQ(true, s1.istarts_with(s2));
+    EXPECT_EQ(true, s1.istarts_with(s3));
+    EXPECT_EQ(false, s1.istarts_with(s4));
+    EXPECT_EQ(false, s1.istarts_with(s5));
+    EXPECT_EQ(false, s2.istarts_with(s1));
 }
 
 TEST(generator, example)
@@ -885,7 +902,7 @@ TEST(generator, example)
 }
 
 retval<double> bar() {
-    return {EALREADY, 0};   // return a failure
+    return {-1, EALREADY};   // return a failure
 }
 
 photon::retval<int> foo(int i) {
@@ -893,7 +910,7 @@ photon::retval<int> foo(int i) {
     default:
         return 32;
     case 1:
-        return retval_base{EINVAL};
+        return reterr{EINVAL};
     case 2:
         LOG_ERROR_RETVAL(EADDRINUSE, "trying to use LOG_ERROR_RETVAL() with an error number constant");
     case 3:
@@ -912,15 +929,27 @@ retval<void> ret_succeeded() {
     return {/* 0 */};
 }
 
-TEST(retval, basic) {
-    const static retval<int> rvs[] =
-        {{32}, {EINVAL, -2345}, {EADDRINUSE, -1234}, {EALREADY, -5234}};
-    EXPECT_EQ(rvs[0], 32);
-    EXPECT_EQ(rvs[1], -2345);
-    EXPECT_EQ(rvs[2], -1234);
-    EXPECT_EQ(rvs[3], -5234);
+template<typename T>
+void check(T rv, decltype(T::_val) v, bool succeeded, int error) {
+    EXPECT_EQ(rv, v);
+    EXPECT_EQ(rv.succeeded(), succeeded);
+    EXPECT_EQ(rv.error(), error);
+}
 
-    for (int i = 0; i < LEN(rvs); ++i) {
+TEST(retval, basic) {
+    errno = EALREADY;
+    const static retval<int> rvs[] =
+        {{32}, {-2345, EINVAL}, {-1234, EADDRINUSE}, {-5234}};
+    check(rvs[0],  32,   true,  0);
+    check(rvs[1], -2345, false, EINVAL);
+    check(rvs[2], -1234, false, EADDRINUSE);
+    check(rvs[3], -5234, false, EALREADY);
+
+    retval<float*> asdf = {nullptr, ECANCELED};
+    check(asdf, nullptr, false, ECANCELED);
+
+    for (auto i: xrange(LEN(rvs))) {
+        static_assert(std::is_same<decltype(i), size_t>::value, "...");
         auto ret = foo(i);
         LOG_DEBUG("got ", ret);
         EXPECT_EQ(ret, rvs[i]);
@@ -954,7 +983,7 @@ void basic_map_test(T &test_map) {
     char xname[1000];
     auto p = test_map.begin();
     for (int i = 200000; i < 300000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(p, make_pair(xname, s));
         ASSERT_EQ(test_map.size(), i/2+1);
@@ -962,7 +991,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 300000; i < 400000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map[xname] = s;
         EXPECT_EQ(test_map[xname], s);
@@ -971,7 +1000,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 400000; i < 500000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(pair<string_view, string_view>{xname, s});
         EXPECT_EQ(test_map.size(), i/2+1);
@@ -1087,7 +1116,7 @@ TEST(string_key, unordered_map_string_key) {
         std::string s = std::to_string(i);
         // string_view view(s);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // std::pair<const std::string_view, int> pr = make_pair(string_view(s), i);
         // unordered_map_string_key<int>::value_type x = make_pair(s, i);
         const std::pair<string, int> x = make_pair(s, i);//{s, i};
@@ -1100,7 +1129,7 @@ TEST(string_key, unordered_map_string_key) {
         //std::string
         std::string s = std::to_string(i);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // string_key k(s);
         // string_view view(s);
         string_view sv(chars);
@@ -1195,6 +1224,23 @@ TEST(string_key, unordered_map_string_kv_perf) {
     basic_map_test(test_map);
 }
 
+template<typename M> static
+void test_map_case_insensitive() {
+    M m;
+    m.emplace("asdf", "jkl;");
+    auto it = m.find("ASDF");
+    EXPECT_NE(it, m.end());
+    EXPECT_EQ(it->second, "jkl;");
+    EXPECT_EQ(m.count("kuherqf"), 0);
+}
+
+TEST(string_key, case_insensitive) {
+    test_map_case_insensitive<unordered_map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<unordered_map_string_kv_case_insensitive>();
+    test_map_case_insensitive<map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<map_string_kv_case_insensitive>();
+}
+
 TEST(RangeLock, Basic) {
   RangeLock m;
 
@@ -1236,6 +1282,49 @@ TEST(PooledAllocator, allocFailed) {
     EXPECT_EQ(nullptr, p2);
 }
 
+TEST(tolowerupper, basic) {
+    EXPECT_EQ(tolower_fast('A'), 'a');
+    EXPECT_EQ(tolower_fast('3'), '3');
+    EXPECT_EQ(tolower_fast('Z'), 'z');
+    EXPECT_EQ(toupper_fast('a'), 'A');
+    EXPECT_EQ(toupper_fast('3'), '3');
+    EXPECT_EQ(toupper_fast('z'), 'Z');
+
+    EXPECT_LT(stricmp_fast("abCd", "ABcD2"), 0);
+    EXPECT_LT(stricmp_fast("abCd1", "ABcD2"), 0);
+    EXPECT_EQ(stricmp_fast("abC1dEf2%^&", "ABc1DeF2%^&"), 0);
+    EXPECT_GT(stricmp_fast("xxxxxxxxxxxjkl;", "xxxxxxxxxxxJKL:"), 0);
+    EXPECT_LT(stricmp_fast("xxxxxxxxxxxaccc", "xxxxxxxxxxxBBBB"), 0);
+
+    auto sign = [](int x) { return (x > 0) ? 1 :
+                                   (x < 0 ? -1 : 0);
+    };
+    const char* headers[] = {"Host", "Content-Length", "Range", "User-Agent", "Connection"};
+    for (auto h1: headers)
+        for (auto h2: headers) {
+            if (sign(stricmp_fast(h1, h2)) != sign(strcasecmp(h1, h2))) {
+                LOG_DEBUG(VALUE(h1), VALUE(h2));
+                EXPECT_EQ(sign(stricmp_fast(h1, h2)), sign(strcasecmp(h1, h2)));
+            }
+    }
+}
+
+const static char S1[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                  S2[]="abcdefghijklmnopqrstuvwxyz";
+TEST(tolowerupper, perf_strncasecmp) {
+    for (int i = 10000000; i; --i) {
+        auto ret = strncasecmp(S1, S2, LEN(S1) - 1);
+        asm volatile(""::"r"(ret));
+    }
+}
+
+TEST(tolowerupper, perf_photon_stricmp) {
+    for (int i = 10000000; i; --i) {
+        auto ret = stricmp_fast(S1, S2);
+        asm volatile(""::"r"(ret));
+    }
+}
+
 TEST(update_now, after_idle_sleep) {
     thread_yield();  // update now
     auto before = photon::now;
@@ -1249,9 +1338,94 @@ TEST(update_now, after_idle_sleep) {
     EXPECT_GT(after_, before);
 }
 
+TEST(SparseArray, test0) {
+    SparseArray<int> a(100);
+    EXPECT_TRUE(a.empty());
+    a.set(1,  123);
+    EXPECT_FALSE(a.empty());
+    a.set(45, 456);
+    a.set(79, 79);
+    a.set(79, 789);
+    a.emplace(23, 234);
+    a.emplace(65, 654);
+    EXPECT_EQ(a.size(), 5);
+    EXPECT_EQ(a[1], 123);
+    EXPECT_EQ(a[45], 456);
+    EXPECT_EQ(a[79], 789);
+    EXPECT_EQ(a[23], 234);
+    EXPECT_EQ(a[65], 654);
+    vector<int> va(a.begin(), a.end()),
+                vb{123, 234, 456, 654, 789};
+    EXPECT_EQ(va, vb);
+
+    auto it = a.begin();
+    EXPECT_EQ(*++it, 234);
+    EXPECT_EQ(*++it, 456);
+    EXPECT_EQ(*++it, 654);
+    EXPECT_EQ(*--it, 456);
+    EXPECT_EQ(*--it, 234);
+    EXPECT_EQ(*--it, 123);
+}
+
+static int num_of_a = 0;
+
+TEST(SparseArray, test1) {
+    class A {
+    public:
+        float a, b = ++num_of_a;
+        A() = default;
+        A(const A& rhs) { a = rhs.a; };
+        A(double x) { a = x; }
+        bool operator==(const A& rhs) const { return a == rhs.a; }
+        ~A() { --num_of_a; }
+    };
+{
+    SparseArray<A> a(100);
+    EXPECT_TRUE(a.empty());
+    a.set(1,  123);
+    EXPECT_FALSE(a.empty());
+    a.set(45, 456);
+    a.set(79, 79);
+    a.set(79, 789);
+    a.emplace(23, 34);
+    a.emplace(23, 234);
+    a.emplace(65, 654);
+    EXPECT_EQ(a.size(), 5);
+    EXPECT_EQ(a[1], 123);
+    EXPECT_EQ(a[45], 456);
+    EXPECT_EQ(a[79], 789);
+    EXPECT_EQ(a[23], 234);
+    EXPECT_EQ(a[65], 654);
+    EXPECT_EQ(num_of_a, 5);
+    vector<A> va(a.begin(), a.end());
+    EXPECT_EQ(num_of_a, 10);
+    vector<A> vb{123, 234, 456, 654, 789};
+    EXPECT_EQ(num_of_a, 15);
+    EXPECT_EQ(va, vb);
+}
+    EXPECT_EQ(num_of_a, 0);
+}
+
+TEST(unordered_inline_set, test0) {
+    static int a[] = {421, 3, 79, 9785234, 7494};
+    unordered_inline_set<int> set(a, a + LEN(a));
+    for (auto x: a) {
+        EXPECT_EQ(set.count(x), 1);
+        EXPECT_EQ(set.count(-x), 0);
+    }
+    vector<int> va(a, a + LEN(a)),
+        vb(set.begin(), set.end());
+    sort(va.begin(), va.end());
+    sort(vb.begin(), vb.end());
+    EXPECT_EQ(va, vb);
+}
+
+
+#include <vector>
 // #endif
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     char a[100]{}, b[100]{};

@@ -33,22 +33,17 @@ public:
     const HeadersBase* _h;
     HeaderAssistant(const HeadersBase* h) : _h(h) {}
 
-    int icmp(estring_view k1, estring_view k2) const {
-        int r = (int)(k1.size() - k2.size());
-        return r ? r : strncasecmp(k1.data(), k2.data(), k1.size());
-    }
-
     bool equal_to(rstring_view16 _k, std::string_view key) const {
-        return icmp(_k | _h->m_buf, key) == 0;
+        return (_k | _h->m_buf).icmp(key) == 0;
     }
     bool less(rstring_view16 _k1, rstring_view16 _k2) const {
-        return icmp(_k1 | _h->m_buf, _k2 | _h->m_buf) < 0;
+        return (_k1 | _h->m_buf).icmp(_k2 | _h->m_buf) < 0;
     }
     bool less(rstring_view16 _k, std::string_view key) const {
-        return icmp(_k | _h->m_buf, key) < 0;
+        return (_k | _h->m_buf).icmp(key) < 0;
     }
     bool less(std::string_view key, rstring_view16 _k) const {
-        return icmp(key, _k | _h->m_buf) < 0;
+        return estring_view(key).icmp(_k | _h->m_buf) < 0;
     }
 
     bool operator()(HeadersBase::KV a, std::string_view b) const { return less(a.first, b); }
@@ -62,6 +57,13 @@ HeadersBase::iterator HeadersBase::find(std::string_view key) const {
     auto it = std::lower_bound(kv_begin(), kv_end(), key, HA(this));
     if (it == kv_end() || !HA(this).equal_to(it->first, key)) return end();
     return {this, (uint16_t)(it - kv_begin())};
+}
+
+std::pair<HeadersBase::iterator, HeadersBase::iterator>
+HeadersBase::equal_range(std::string_view key) const {
+    auto r = std::equal_range(kv_begin(), kv_end(), key, HA(this));
+    return {{this, (uint16_t)(r.first  - kv_begin())},
+            {this, (uint16_t)(r.second - kv_begin())}};
 }
 
 void buf_append(char*& ptr, uint64_t x) {
@@ -172,10 +174,9 @@ int HeadersBase::parse() {
     Parser p({m_buf, m_buf_size});
     while(p[0] != '\r') {
         auto k = p.extract_until_char(':');
-        p.skip_chars(':');
         p.skip_chars(' ', true);
         auto v = p.extract_until_char('\r');
-        p.skip_string("\r\n");
+        p.skip_chars('\n');
         if (kv_add({k, v}) == nullptr)
             LOG_ERROR_RETURN(0, -1, "add kv failed");
     }

@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
+#include <photon/common/string_view.h>
 
 #ifdef __linux__
 #define _in_addr_field s6_addr32
@@ -45,6 +46,7 @@ namespace net {
     public:
         union {
             in6_addr addr = {};
+            // all data is in network byte order
             struct { uint16_t _1, _2, _3, _4, _5, _6; uint8_t a, b, c, d; };
         } __attribute__((packed));
         // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
@@ -96,6 +98,8 @@ namespace net {
         bool undefined() const {
             return mem_equal(V4Any());
         }
+        void reset() { *this = IPAddr(); }
+        void clear() { reset(); }
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
             assert(is_ipv4());
@@ -154,9 +158,10 @@ namespace net {
         IPAddr addr;
         uint16_t port = 0;
         EndPoint() = default;
+        explicit EndPoint(const char*  ep);
         EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
-        explicit EndPoint(const char* ep);
         EndPoint(const char* ip, uint16_t port) : addr(ip), port(port) {}
+        static EndPoint parse(std::string_view ep, uint16_t default_port);
         bool is_ipv4() const {
             return addr.is_ipv4();
         };
@@ -167,7 +172,14 @@ namespace net {
             return !operator==(rhs);
         }
         bool undefined() const {
-            return addr.undefined();
+            return addr.undefined() && port == 0;
+        }
+        void reset() {
+            addr.reset();
+            port = 0;
+        }
+        void clear() {
+            reset();
         }
     };
 
@@ -204,10 +216,6 @@ namespace net {
             if (ret >= 0) *value = v;
             return ret;
         }
-
-        // get/set default timeout, in us, (default +∞)
-        virtual uint64_t timeout() const = 0;
-        virtual void timeout(uint64_t tm) = 0;
     };
 
     class ISocketName {
@@ -254,6 +262,9 @@ namespace net {
         virtual ISocketStream* connect(const EndPoint& remote, const EndPoint* local = nullptr) = 0;
         // Connect to a Unix Domain Socket.
         virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
+
+        virtual uint64_t timeout() const = 0;
+        virtual void timeout(uint64_t) = 0;
     };
 
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
@@ -276,9 +287,12 @@ namespace net {
         virtual int start_loop(bool block = false) = 0;
         // Close the listening fd. It's the user's responsibility to close the active connections.
         virtual void terminate() = 0;
+
+        virtual uint64_t timeout() const = 0;
+        virtual void timeout(uint64_t) = 0;
     };
 
-    extern "C" ISocketClient* new_tcp_socket_client();
+    extern "C" ISocketClient* new_tcp_socket_client(IPAddr* bind_ip = nullptr, uint32_t bind_ip_n = 0);
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);

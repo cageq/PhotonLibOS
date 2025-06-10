@@ -18,26 +18,31 @@ limitations under the License.
 #include <linux/mman.h>
 #endif
 #include <errno.h>
+#include <photon/common/alog.h>
 #include <photon/common/utility.h>
+#include <photon/thread/arch.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <vector>
 
 namespace photon {
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
-          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024,
-          size_t ALIGNMENT = 64>
+          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
 class PooledStackAllocator {
     constexpr static bool is_power2(size_t n) { return (n & (n - 1)) == 0; }
-    static_assert(is_power2(ALIGNMENT), "must be 2^n");
     static_assert(is_power2(MAX_ALLOCATION_SIZE), "must be 2^n");
     const static size_t N_SLOTS =
         __builtin_ffsl(MAX_ALLOCATION_SIZE / MIN_ALLOCATION_SIZE);
 
 public:
-    PooledStackAllocator() {}
+    PooledStackAllocator() {
+        for (size_t i = 0; i < N_SLOTS; i++) {
+            slots[i].slotsize = MIN_ALLOCATION_SIZE << i;
+        }
+    }
 
 protected:
     size_t in_pool_size = 0;
@@ -45,7 +50,7 @@ protected:
 
     static void* __alloc(size_t alloc_size) {
         void* ptr;
-        int ret = ::posix_memalign(&ptr, ALIGNMENT, alloc_size);
+        int ret = ::posix_memalign(&ptr, PAGE_SIZE, alloc_size);
         if (ret != 0) {
             errno = ret;
             return nullptr;
@@ -53,37 +58,41 @@ protected:
 #if defined(__linux__)
         madvise(ptr, alloc_size, MADV_NOHUGEPAGE);
 #endif
+        mprotect(ptr, PAGE_SIZE, PROT_NONE);
         return ptr;
     }
 
     static void __dealloc(void* ptr, size_t size) {
+        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
         madvise(ptr, size, MADV_DONTNEED);
         free(ptr);
     }
 
     struct Slot {
-        std::vector<std::pair<void*, size_t>> pool;
+        std::vector<void*> pool;
+        uint32_t slotsize;
 
         ~Slot() {
             for (auto pt : pool) {
-                __dealloc(pt.first, pt.second);
+                __dealloc(pt, slotsize);
             }
         }
-        std::pair<void*, size_t> get() {
+        void* get() {
             if (!pool.empty()) {
                 auto ret = pool.back();
                 pool.pop_back();
                 return ret;
             }
-            return {nullptr, 0};
+            return nullptr;
         }
-        void put(void* ptr, size_t size) { pool.emplace_back(ptr, size); }
+        void put(void* ptr) { pool.emplace_back(ptr); }
     };
 
-    static inline uint32_t get_slot(uint32_t length) {
-        static auto base = __builtin_clz(MIN_ALLOCATION_SIZE - 1);
-        auto index = __builtin_clz(length - 1);
-        return base > index ? base - index : 0;
+    // get_slot(length) returns first slot that larger or equal to length
+    uint32_t get_slot(uint32_t length) {
+        auto index = log2_round_up(length);
+        auto base = log2_truncate(MIN_ALLOCATION_SIZE);
+        return (index <= base) ? 0 : (index - base);
     }
 
     Slot slots[N_SLOTS];
@@ -91,30 +100,29 @@ protected:
 public:
     void* alloc(size_t size) {
         auto idx = get_slot(size);
-        if (unlikely(idx > N_SLOTS)) {
+        if (unlikely(idx >= N_SLOTS)) {
             // larger than biggest slot
             return __alloc(size);
         }
         auto ptr = slots[idx].get();
-        if (unlikely(!ptr.first)) {
-            // slots[idx] empty
-            return __alloc(size);
-        }
         // got from pool
-        in_pool_size -= ptr.second;
-        return ptr.first;
+        if (ptr) {
+            in_pool_size -= slots[idx].slotsize;
+            return ptr;
+        }
+        return __alloc(slots[idx].slotsize);
     }
     int dealloc(void* ptr, size_t size) {
         auto idx = get_slot(size);
-        if (unlikely(idx > N_SLOTS ||
-                     (in_pool_size + size >= trim_threshold))) {
+        if (unlikely(idx >= N_SLOTS ||
+                     (in_pool_size + slots[idx].slotsize >= trim_threshold))) {
             // big block or in-pool buffers reaches to threshold
-            __dealloc(ptr, size);
+            __dealloc(ptr, idx >= N_SLOTS ? size : slots[idx].slotsize);
             return 0;
         }
         // Collect into pool
-        in_pool_size += size;
-        slots[idx].put(ptr, size);
+        in_pool_size += slots[idx].slotsize;
+        slots[idx].put(ptr);
         return 0;
     }
     size_t trim(size_t keep_size) {
@@ -123,9 +131,9 @@ public:
             if (!slots[i].pool.empty()) {
                 auto ptr = slots[i].pool.back();
                 slots[i].pool.pop_back();
-                in_pool_size -= ptr.second;
-                count += ptr.second;
-                __dealloc(ptr.first, ptr.second);
+                in_pool_size -= slots[i].slotsize;
+                count += slots[i].slotsize;
+                __dealloc(ptr, slots[i].slotsize);
             }
         }
         return count;
@@ -136,10 +144,10 @@ public:
     }
 };
 
-template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE,
-          size_t ALIGNMENT>
-size_t PooledStackAllocator<MIN_ALLOCATION_SIZE, MAX_ALLOCATION_SIZE,
-                            ALIGNMENT>::trim_threshold = 1024UL * 1024 * 1024;
+template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE>
+size_t PooledStackAllocator<MIN_ALLOCATION_SIZE,
+                            MAX_ALLOCATION_SIZE>::trim_threshold =
+    1024UL * 1024 * 1024;
 
 static PooledStackAllocator<>& get_pooled_stack_allocator() {
     thread_local PooledStackAllocator<> _alloc;
@@ -163,5 +171,26 @@ size_t pooled_stack_trim_threshold(size_t x) {
 
 size_t pooled_stack_trim_current_vcpu(size_t keep_size);
 size_t pooled_stack_trim_threshold(size_t x);
+
+void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
+    char* ptr = nullptr;
+    int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
+    if (unlikely(err))
+        LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
+                         ERRNO(err));
+#if defined(__linux__)
+    madvise(ptr, stack_size, MADV_NOHUGEPAGE);
+#endif
+    mprotect(ptr, PAGE_SIZE, PROT_NONE);
+    return ptr;
+}
+
+void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
+    mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+#if !defined(_WIN64) && !defined(__aarch64__)
+    madvise(ptr, size, MADV_DONTNEED);
+#endif
+    free(ptr);
+}
 
 }  // namespace photon

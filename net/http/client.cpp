@@ -24,6 +24,7 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/net/security-context/tls-stream.h>
 #include <photon/net/utils.h>
+#include <photon/photon.h>
 
 namespace photon {
 namespace net {
@@ -35,25 +36,53 @@ static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
-    bool tls_ctx_ownership;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
+    std::unique_ptr<ISocketClient> udssock;
     std::unique_ptr<Resolver> resolver;
+    photon::mutex init_mtx;
+    bool initialized = false;
+    bool tls_ctx_ownership = false;
 
-    //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
-    PooledDialer(TLSContext *_tls_ctx) :
-            tls_ctx(_tls_ctx ? _tls_ctx : new_tls_context(nullptr, nullptr, nullptr)),
-            tls_ctx_ownership(_tls_ctx == nullptr),
-            resolver(new_default_resolver(kDNSCacheLife)) {
-        auto tcp_cli = new_tcp_socket_client();
-        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
-        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
-        tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
+    // If there is a photon thread switch during construction, the constructor might be called
+    // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
+    // thread switch inside the constructor. Place the initialization work in init() and ensure it
+    // is initialized only once.
+    PooledDialer() {
+        photon::fini_hook({this, &PooledDialer::at_photon_fini});
     }
 
-    ~PooledDialer() {
+    int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips) {
+        if (initialized)
+            return 0;
+        SCOPED_LOCK(init_mtx);
+        if (initialized)
+            return 0;
+        tls_ctx = _tls_ctx;
+        if (!tls_ctx) {
+            tls_ctx_ownership = true;
+            tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
+            tls_ctx->set_verify_mode(VerifyMode::PEER);  // act like curl
+        }
+        auto tcp_cli = new_tcp_socket_client(src_ips.data(), src_ips.size());
+        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(src_ips.data(), src_ips.size()), true);
+        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
+        tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
+        udssock.reset(new_uds_client());
+        resolver.reset(new_default_resolver(kDNSCacheLife));
+        initialized = true;
+        return 0;
+    }
+
+    void at_photon_fini() {
+        resolver.reset();
+        udssock.reset();
+        tlssock.reset();
+        tcpsock.reset();
         if (tls_ctx_ownership)
             delete tls_ctx;
+        initialized = false;
+        tls_ctx_ownership = false;
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
@@ -63,6 +92,8 @@ public:
     ISocketStream* dial(const T& x, uint64_t timeout = -1UL) {
         return dial(x.host_no_port(), x.port(), x.secure(), timeout);
     }
+
+    ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1UL);
 };
 
 ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
@@ -78,7 +109,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, host.data());
+        tls_stream_set_hostname(sock, estring_view(host).extract_c_str());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
@@ -92,6 +123,14 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     // different ips.
     resolver->discard_cache(host, ipaddr);
     return nullptr;
+}
+
+ISocketStream* PooledDialer::dial(std::string_view uds_path, uint64_t timeout) {
+    udssock->timeout(timeout);
+    auto stream = udssock->connect(uds_path.data());
+    if (!stream)
+        LOG_ERRNO_RETURN(0, nullptr, "failed to dial to unix socket `", uds_path);
+    return stream;
 }
 
 constexpr uint64_t code3xx() { return 0; }
@@ -115,12 +154,17 @@ enum RoundtripStatus {
 
 class ClientImpl : public Client {
 public:
-    PooledDialer m_dialer;
     CommonHeaders<> m_common_headers;
+    TLSContext *m_tls_ctx;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_dialer(tls_ctx),
+        m_tls_ctx(tls_ctx),
         m_cookie_jar(cookie_jar) {
+    }
+    PooledDialer& get_dialer() {
+        thread_local PooledDialer dialer;
+        dialer.init(m_tls_ctx, m_bind_ips);
+        return dialer;
     }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
@@ -153,18 +197,18 @@ public:
         return ROUNDTRIP_REDIRECT;
     }
 
-    int concurreny = 0;
     int do_roundtrip(Operation* op, Timeout tmo) {
-        concurreny++;
-        LOG_DEBUG(VALUE(concurreny));
-        DEFER(concurreny--);
         op->status_code = -1;
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
-        auto s = (m_proxy && !m_proxy_url.empty())
-                     ? m_dialer.dial(m_proxy_url, tmo.timeout())
-                     : m_dialer.dial(req, tmo.timeout());
+        ISocketStream* s;
+        if (m_proxy && !m_proxy_url.empty())
+            s = get_dialer().dial(m_proxy_url, tmo.timeout());
+        else if (!op->uds_path.empty())
+            s = get_dialer().dial(op->uds_path, tmo.timeout());
+        else
+            s = get_dialer().dial(req, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -180,7 +224,14 @@ public:
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
         }
         sock->timeout(tmo.timeout());
-        if (op->body_stream) {
+        if (op->body_buffer_size > 0) {
+            // send body_buffer
+            if (req.write(op->body_buffer, op->body_buffer_size) < 0) {
+                sock->close();
+                req.reset_status();
+                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body buffer failed, retry");
+            }
+        } else if (op->body_stream) {
             // send body_stream
             if (req.write_stream(op->body_stream) < 0) {
                 sock->close();
@@ -234,9 +285,10 @@ public:
             LOG_ERROR_RETURN(EINVAL, ROUNDTRIP_FAILED,
                             "Content-Length and Transfer-Encoding conflicted");
         }
-        op->req.headers.insert("User-Agent", USERAGENT);
-        op->req.headers.insert("Connection", "keep-alive");
         op->req.headers.merge(m_common_headers);
+        op->req.headers.insert("User-Agent", m_user_agent.empty() ? std::string_view(USERAGENT)
+                                                                  : std::string_view(m_user_agent));
+        op->req.headers.insert("Connection", "keep-alive");
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
@@ -271,7 +323,7 @@ public:
     }
 
     ISocketStream* native_connect(std::string_view host, uint16_t port, bool secure, uint64_t timeout) override {
-        return m_dialer.dial(host, port, secure, timeout);
+        return get_dialer().dial(host, port, secure, timeout);
     }
 
     CommonHeaders<>* common_headers() override {

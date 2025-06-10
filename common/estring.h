@@ -22,6 +22,7 @@ limitations under the License.
 #include <limits>
 #include <string>
 #include <bitset>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 
@@ -55,6 +56,7 @@ struct charset : std::bitset<256>
     // }
 };
 
+class estring;
 class estring_view : public std::string_view
 {
 public:
@@ -75,6 +77,45 @@ public:
     size_t find_last_of(const charset& set) const;
     size_t find_last_not_of(const charset& set) const;
 
+    bool operator==(char c) const { return size() == 1 && front() == c; }
+    bool operator!=(char c) const { return !(*this == c); }
+
+    template<size_t N>
+    class Extraction {
+        char _buf[N];
+        std::unique_ptr<char> _s;
+        bool _ownership;
+    public:
+        Extraction(std::string_view sv, bool strict = false) {
+            //for regular strings, sv[sv.size()] should be accessible
+            if (!strict && sv[sv.size()] == '\0') {
+                _s.reset((char*)sv.data());
+                _ownership = false;
+            } else if (sv.size() < N) {
+                memcpy(_buf, sv.data(), sv.size());
+                _buf[sv.size()] = '\0';
+                _s.reset(_buf);
+                _ownership = false;
+            } else {
+                auto ptr = (char*)malloc(sv.size() + 1);
+                memcpy(ptr, sv.data(), sv.size());
+                ptr[sv.size()] = '\0';
+                _s.reset(ptr);
+                _ownership = true;
+            }
+        }
+        operator const char* () const {
+            return _s.get();
+        }
+        ~Extraction() {
+            if (!_ownership)
+                _s.release();
+        }
+    };
+    template<size_t N = 256>
+    Extraction<N> extract_c_str() const {
+        return {*this};
+    }
     operator std::string ()
     {
         return to_string();
@@ -104,29 +145,23 @@ public:
         return substr(start, end - start + 1);
     }
 #if __cplusplus < 202000L
-    bool starts_with(estring_view x)
-    {
-        auto len = x.size();
-        return length() >= len &&
-            memcmp(data(), x.data(), len) == 0;
+    bool starts_with(std::string_view x) const {
+        return size() >= x.size() && substr(0, x.size()) == x;
     }
 
-    bool ends_with(estring_view x)
-    {
-        auto len = x.size();
-        return length() >= len &&
-            memcmp(&*end() - len, x.data(), len) == 0;
+    bool ends_with(std::string_view x) const {
+        return size() >= x.size() && substr(size() - x.size()) == x;
     }
 #endif
 
-    bool istarts_with(estring_view x) {
-        return strncasecmp(data(), x.data(), x.size()) == 0;
+    int icmp(std::string_view x) const;
+    estring tolower_fast() const;
+    estring toupper_fast() const;
+    bool istarts_with(std::string_view x) const {
+        return size() >= x.size() && substr(0, x.size()).icmp(x) == 0;
     }
-
-    int icmp(estring_view x) {
-        auto ret = strncasecmp(data(), x.data(), std::min(size(), x.size()));
-        if (ret != 0) return ret;
-        return size() - x.size();
+    bool iends_with(std::string_view x) const {
+        return size() >= x.size() && substr(size() - x.size()).icmp(x) == 0;
     }
 
     template<typename Separator>
@@ -308,9 +343,9 @@ public:
     bool to_double_check(double* v = nullptr)
     {
         char buf[32];
-        auto len = std::max(this->size(), sizeof(buf) - 1 );
+        auto len = std::min(this->size(), sizeof(buf) - 1 );
         memcpy(buf, data(), len);
-        buf[len] = '0';
+        buf[len] = '\0';
         return sscanf(buf, "%lf", v) == 1;
     }
     double to_double(double default_val = NAN)
@@ -424,7 +459,6 @@ public:
 
     estring() = default;
     estring(const std::string& v) : std::string(v) {}
-    estring(estring_view sv) : std::string(sv) { }
     estring(std::string_view sv) : std::string(sv) { }
 
     estring_view view() const
@@ -436,12 +470,10 @@ public:
         return view().trim(spaces);
     }
 #if __cplusplus < 202000L
-    bool starts_with(estring_view x)
-    {
+    bool starts_with(std::string_view x) const {
         return view().starts_with(x);
     }
-    bool ends_with(estring_view x)
-    {
+    bool ends_with(std::string_view x) const {
         return view().ends_with(x);
     }
 #endif
@@ -449,6 +481,9 @@ public:
     {
         return view().all_digits();
     }
+
+    bool operator==(char c) const { return size() == 1 && front() == c; }
+    bool operator!=(char c) const { return !(*this == c); }
 
     template<typename...Ts>
     auto split(const Ts&...xs) const ->
@@ -658,3 +693,50 @@ struct hash<estring> {
 };
 } // namespace std
 
+namespace photon {
+
+inline char tolower_fast(char c) {
+    return c + ('a' - 'A') * ('A' <= c && c <= 'Z');
+}
+
+inline char toupper_fast(char c) {
+    return c - ('a' - 'A') * ('a' <= c && c <= 'z');
+}
+
+// convert string to lower or upper, if len == 0 then len = strlen(in)
+// the storage of out must be >= len + 1
+// it's possible that out == in
+void tolower_fast(char* out, const char* in, size_t len);
+void toupper_fast(char* out, const char* in, size_t len);
+inline void tolower_fast(char* out, std::string_view in) {
+    tolower_fast(out, in.data(), in.size());
+}
+inline void toupper_fast(char* out, std::string_view in) {
+    toupper_fast(out, in.data(), in.size());
+}
+inline estring tolower_fast(std::string_view in) {
+    estring out(in.size(), '\0');
+    tolower_fast(&out[0], in);
+    return out;
+}
+inline estring toupper_fast(std::string_view in) {
+    estring out(in.size(), '\0');
+    toupper_fast(&out[0], in);
+    return out;
+}
+
+// compare 2 strings ignoring cases
+int stricmp_fast(std::string_view a, std::string_view b);
+
+} // namespace photon
+
+inline int estring_view::icmp(std::string_view x) const {
+    return photon::stricmp_fast(*this, x);
+}
+
+inline estring estring_view::tolower_fast() const {
+    return photon::toupper_fast(*this);
+}
+inline estring estring_view::toupper_fast() const {
+    return photon::toupper_fast(*this);
+}

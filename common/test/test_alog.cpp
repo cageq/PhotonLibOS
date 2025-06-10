@@ -19,7 +19,6 @@ limitations under the License.
 #include "../alog-stdstring.h"
 #include "../alog-functionptr.h"
 #include "../alog-audit.h"
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils-stdstring.h>
@@ -28,6 +27,8 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "../../test/ci-tools.h"
+#include "../../test/gtest.h"
 
 class LogOutputTest : public ILogOutput {
 public:
@@ -408,8 +409,8 @@ void test_defer()
 
 TEST(test, test)
 {
-    char asdf[20];
-//  int qwer[LEN(asdf)];
+//    char asdf[20];
+//    int qwer[LEN(asdf)];
 //    vector<int> uio;      // should not compile! to avoid misuse
 //    auto len = LEN(uio);
 
@@ -575,8 +576,17 @@ TEST(ALOG, IPAddr) {
     EXPECT_STREQ("abcd:1111:222:33:4:5:6:7", log_output_test.log_start());
 }
 
+TEST(ALOG, signed_zero) {
+    log_output = &log_output_test;
+    DEFER(log_output = log_output_stdout);
+
+    LOG_INFO(DEC(0));
+    EXPECT_STREQ("0", log_output_test.log_start());
+}
+
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);

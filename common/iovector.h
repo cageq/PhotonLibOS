@@ -40,8 +40,10 @@ limitations under the License.
 #include <photon/common/io-alloc.h>
 
 #pragma GCC diagnostic push
-#if __GNUC__ >= 13
+#if defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#endif
+#if __GNUC__ >= 12
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
 #endif
 
@@ -900,8 +902,8 @@ protected:
         }
         void copy(IOAlloc* rhs, uint16_t nbases)
         {
+            *(IOAlloc*)this = *rhs;
             auto rhs_ = (IOVAllocation_*)rhs;
-            *this = *rhs_;
             memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases);
         }
     };
@@ -1006,24 +1008,24 @@ public:
     }
 };
 
-inline size_t iovector_view::memcpy_to(iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_to(iov, size);
+inline size_t iovector_view::memcpy_to(iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_to(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_from(iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_from(iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_to(const iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_to(const iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_from(const iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_from(const iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
 

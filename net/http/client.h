@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
 #include <photon/net/socket.h>
-
+#include <vector>
 
 namespace photon {
 namespace net {
@@ -40,6 +40,17 @@ public:
 
 class Client : public Object {
 public:
+    class Operation;
+    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
+        return Operation::create(this, v, url, buf_size);
+    }
+    Operation* new_operation(uint16_t buf_size = UINT16_MAX) {
+        return Operation::create(this, buf_size);
+    }
+    void destroy_operation(Operation* op) {
+        op->destroy();
+    }
+
     class Operation {
     public:
         Request req;                              // request
@@ -48,10 +59,13 @@ public:
         uint16_t retry = 5;                       // default retry: 5 at most
         Response resp;                            // response
         int status_code = -1;                     // status code in response
-        bool enable_proxy;
-        IStream* body_stream = nullptr;                 // use body_stream as body
-        using BodyWriter = Delegate<ssize_t, Request*>; // or call body_writer if body_stream
-        BodyWriter body_writer = {};                    // is not set
+        bool enable_proxy = false;
+        std::string_view uds_path;                // If set, Unix Domain Socket will be used instead of TCP.
+                                                  // URL should still be the format of http://localhost/xxx
+
+        IStream* body_stream = nullptr;           // priority: set_body > body_stream > body_writer
+        using BodyWriter = Delegate<ssize_t, Request*>;
+        BodyWriter body_writer = {};
 
         static Operation* create(Client* c, Verb v, std::string_view url,
                             uint16_t buf_size = 64 * 1024 - 1) {
@@ -62,15 +76,38 @@ public:
             auto ptr = malloc(sizeof(Operation) + buf_size);
             return new (ptr) Operation(c, buf_size);
         }
-        void set_enable_proxy(bool enable) { enable_proxy = enable; }
-
+        void destroy() {
+            this->~Operation();
+            free(this);
+        }
+        void set_enable_proxy(bool enable) {
+            enable_proxy = enable;
+        }
         int call() {
             if (!_client) return -1;
             return _client->call(this);
         }
+        int call(std::string_view unix_socket_path) {
+            if (!_client) return -1;
+            uds_path = unix_socket_path;
+            return _client->call(this);
+        }
+        // set body buffer and set content length automatically
+        void set_body(const void *buf, size_t size) {
+            body_buffer = buf;
+            body_buffer_size = size;
+            req.headers.content_length(size);
+        }
+        void set_body(std::string_view buf) {
+            set_body(buf.data(), buf.length());
+        }
+
 
     protected:
         Client* _client;
+        const void *body_buffer = nullptr;
+        size_t body_buffer_size = 0;
+
         char _buf[0];
         Operation(Client* c, Verb v, std::string_view url, uint16_t buf_size)
             : req(_buf, buf_size, v, url, c->has_proxy()),
@@ -80,24 +117,20 @@ public:
             : req(_buf, buf_size),
               enable_proxy(c->has_proxy()),
               _client(c) {}
-        Operation(uint16_t buf_size) : req(_buf, buf_size) {}
+        explicit Operation(uint16_t buf_size) : req(_buf, buf_size), _client(nullptr) {}
+        Operation() = delete;
+        ~Operation() = default;
+
+        friend class ClientImpl;
     };
 
-    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = 64 * 1024 - 1) {
-        return Operation::create(this, v, url, buf_size);
-    }
-
-    Operation* new_operation(uint16_t buf_size = 64 * 1024 - 1) {
-        return Operation::create(this, buf_size);
-    }
-
-    template<uint16_t BufferSize>
+    template<uint16_t BufferSize = UINT16_MAX>
     class OperationOnStack : public Operation {
         char _buf[BufferSize];
     public:
         OperationOnStack(Client* c, Verb v, std::string_view url):
             Operation(c, v, url, BufferSize) {}
-        OperationOnStack(Client* c): Operation(c, BufferSize) {};
+        explicit OperationOnStack(Client* c): Operation(c, BufferSize) {};
         OperationOnStack(): Operation(BufferSize) {}
     };
 
@@ -108,6 +141,12 @@ public:
     void set_proxy(std::string_view proxy) {
         m_proxy_url.from_string(proxy);
         m_proxy = true;
+    }
+    void set_user_agent(std::string_view user_agent) {
+        m_user_agent = std::string(user_agent);
+    }
+    void set_bind_ips(std::vector<IPAddr> &ips) {
+        m_bind_ips = ips;
     }
     StoredURL* get_proxy() {
         return &m_proxy_url;
@@ -126,11 +165,13 @@ public:
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000UL * 1000UL); }
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
-                                    bool secure = false, uint64_t timeout = -1UL) = 0;
+                                          bool secure = false, uint64_t timeout = -1UL) = 0;
 protected:
     StoredURL m_proxy_url;
+    std::string m_user_agent;
     uint64_t m_timeout = -1UL;
     bool m_proxy = false;
+    std::vector<IPAddr> m_bind_ips;
 };
 
 //A Client without cookie_jar would ignore all response-header "Set-Cookies"

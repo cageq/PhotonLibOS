@@ -85,7 +85,11 @@ namespace fs
     {
     public:
         template<typename IF, typename Func, typename...ARGS,
+#if __cplusplus < 201703L
             typename R = typename std::result_of<Func(IF*, ARGS...)>::type >
+#else
+            typename R = typename std::invoke_result<Func, IF*, ARGS...>::type>
+#endif
         R perform(IF* _if, Func func, ARGS...args)
         {
             return th_performer<R>().call(_if, func, args...);
@@ -134,13 +138,11 @@ namespace fs
         struct AsyncWaiter
         {
             std::mutex _mtx;
-            std::unique_lock<std::mutex> _lock;
             std::condition_variable _cond;
             bool _got_it = false;
             typename AsyncResult<R>::result_type ret;
             int err = 0;
 
-            AsyncWaiter() : _lock(_mtx) { }
             int on_done(AsyncResult<R>* r)
             {
                 std::lock_guard<std::mutex> lock(_mtx);
@@ -156,8 +158,9 @@ namespace fs
             }
             R wait()
             {
+                std::unique_lock<std::mutex> lock(_mtx);
                 while(!_got_it)
-                    _cond.wait(_lock, [this]{return _got_it;});
+                    _cond.wait(lock, [this]{return _got_it;});
                 if (err) errno = err;
                 return (R)ret;
             }

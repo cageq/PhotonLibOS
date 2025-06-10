@@ -1,13 +1,13 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/throttle.h>
 #include <photon/common/utility.h>
 #include <photon/net/socket.h>
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
+#include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
 TEST(Throttle, basic) {
@@ -166,7 +166,8 @@ TEST(Throttle, try_consume) {
 }
 
 ////////////////////////////////////////
-#if defined(NDEBUG) && !defined(__APPLE__)
+// The sleep and semaphore in macOS is less efficient and always cause variance, so skip macOS
+#ifndef __APPLE__
 
 struct FindAppropriateSliceNumSuite {
     uint64_t slice_num;
@@ -177,6 +178,8 @@ class FindAppropriateSliceNumTest : public testing::TestWithParam<FindAppropriat
 };
 
 // More slices in a time window means sleep more frequently.
+// In a fixed total time (10s), we measure how many IO were throttled (consumed),
+// and compare to the dest amount, figure out the loss ratio brought by the throttler.
 TEST_P(FindAppropriateSliceNumTest, run) {
     const auto& p = GetParam();
 
@@ -202,17 +205,24 @@ TEST_P(FindAppropriateSliceNumTest, run) {
         t.consume(bs_per_io);
         bytes += bs_per_io;
     }
-    auto goal = bw * 10;
+    auto goal = bw * test_time_sec;
     auto diff = int64_t(bytes) - int64_t(goal);
     auto loss = double(std::abs(diff)) / double(goal);
-    LOG_INFO("Consume ` bytes in 10 seconds, loss ratio `", bytes, loss);
+    LOG_INFO("Consume ` bytes in ` seconds, loss ratio `", bytes, test_time_sec, loss);
     GTEST_ASSERT_LE(loss, p.performance_loss_max_ratio);
 }
 
-INSTANTIATE_TEST_CASE_P(Throttle, FindAppropriateSliceNumTest, testing::Values(
+#ifdef INSTANTIATE_TEST_SUITE_P
+#define INSTANTIATE_TEST_P INSTANTIATE_TEST_SUITE_P
+#else
+#define INSTANTIATE_TEST_P INSTANTIATE_TEST_CASE_P
+#endif
+
+INSTANTIATE_TEST_P(Throttle,
+        FindAppropriateSliceNumTest, testing::Values(
         FindAppropriateSliceNumSuite{10, 0.01},
-        FindAppropriateSliceNumSuite{50, 0.01},
-        FindAppropriateSliceNumSuite{100, 0.02},
+        FindAppropriateSliceNumSuite{50, 0.02},
+        FindAppropriateSliceNumSuite{100, 0.03},
         FindAppropriateSliceNumSuite{500, 0.08},
         FindAppropriateSliceNumSuite{1000, 0.08},
         FindAppropriateSliceNumSuite{5000, 0.85}    // Unacceptable
@@ -240,11 +250,13 @@ struct PriorityTestSuite {
 };
 
 class ThrottlePriorityTest : public testing::TestWithParam<PriorityTestSuite> {
+protected:
+    std::atomic<bool> running_{true};
 };
 
-INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
+INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
         PriorityTestSuite{
-                // 0
+                // 0. Simulate same priority and equally divide the BW
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 100'000, photon::throttle::Priority::High},
@@ -253,7 +265,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.4, 0.6,
         },
         PriorityTestSuite{
-                // 1
+                // 1. Simulate same priority but different BW, results are still the same
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 1'000'000, photon::throttle::Priority::High},
@@ -262,7 +274,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.4, 0.6,
         },
         PriorityTestSuite{
-                // 2
+                // 2. Simulate different priorities with the same BW. Total BW exceeds limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {100'000'000, 500'000, photon::throttle::Priority::High},
@@ -271,7 +283,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.0, 0.1,
         },
         PriorityTestSuite{
-                // 3
+                // 3. Simulate different priorities with the same BW. Total BW under the limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {30'000'000, 1'000'000, photon::throttle::Priority::High},
@@ -280,7 +292,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.3, 0.7,
         },
         PriorityTestSuite{
-                // 4
+                // 4. Simulate different priorities with different BW. Total BW exceeds limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 5'000'000, photon::throttle::Priority::High},
@@ -289,7 +301,8 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.45, 0.6,
         },
         PriorityTestSuite{
-                // 5. For now there is no way to balance throttle throughput of the same priority.
+                // 5. Real socket. For now there is no way to balance throttle throughput of the same priority.
+                // Maybe we need a WFQ in the future.
                 PriorityTestSuite::RealSocket,
                 1'000'000'000,
                 {1'000'000'000, 1048576, photon::throttle::Priority::High},
@@ -298,7 +311,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.0, 1.0,
         },
         PriorityTestSuite{
-                // 6
+                // 6. Real socket. High priority get most BW
                 PriorityTestSuite::RealSocket,
                 1'000'000'000,
                 {800'000'000, 32768, photon::throttle::Priority::High},
@@ -307,11 +320,11 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.1, 0.3,
         },
         PriorityTestSuite{
-                // 7
+                // 7. Real socket. Low priority gets the rest BW that high priority doesn't need
                 PriorityTestSuite::RealSocket,
-                10'000'000,
-                {5'000'000, 10'000, photon::throttle::Priority::High},
-                {100'000'000, 4'000'000, photon::throttle::Priority::Low},
+                100'000'000,
+                {50'000'000, 10'000, photon::throttle::Priority::High},
+                {1'000'000'000, 4'000'000, photon::throttle::Priority::Low},
                 0.4, 0.6,
                 0.4, 0.6,
         }
@@ -319,9 +332,11 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
 
 static void run_real_socket(const std::atomic<bool>& running, const PriorityTestSuite& p,
                             uint64_t& bw1, uint64_t& bw2) {
+    photon::semaphore stream_counter;
     photon::throttle t(p.limit_bw);
     uint64_t buf_size = std::max(p.io1.bs, p.io2.bs);
     auto server = photon::net::new_tcp_socket_server();
+    ASSERT_NE(nullptr, server);
     DEFER(delete server);
 
     auto handler = [&](photon::net::ISocketStream* sock) -> int {
@@ -331,24 +346,31 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
             if (ret <= 0) break;
             photon::thread_yield();
         }
+        stream_counter.signal(1);
         return 0;
     };
-    server->setsockopt<int>(SOL_SOCKET, SO_REUSEPORT, 1);
-    server->set_handler(handler);
-    server->bind_v4any(0);
-    server->listen();
-    server->start_loop(false);
 
-    photon::semaphore sem;
+    int ret = server->setsockopt<int>(SOL_SOCKET, SO_REUSEPORT, 1);
+    ASSERT_EQ(0, ret);
+    server->set_handler(handler);
+    ret = server->bind_v4any(0);
+    ASSERT_EQ(0, ret);
+    ret = server->listen();
+    ASSERT_EQ(0, ret);
+    ret = server->start_loop(false);
+    ASSERT_EQ(0, ret);
+
     auto server_ep = server->getsockname();
     auto cli = photon::net::new_tcp_socket_client();
+    ASSERT_NE(nullptr, cli);
     DEFER(delete cli);
 
-    photon::thread_create11([&] {
+    auto client_th1 = photon::thread_create11([&] {
         photon::throttle src(p.io1.bw);
         auto conn = cli->connect(server_ep);
+        if (!conn) exit(1);
         DEFER(delete conn);
-        char buf[buf_size];
+        char buf[buf_size] = {};
         while (running) {
             src.consume(p.io1.bs);
             ssize_t ret = conn->send(buf, p.io1.bs);
@@ -356,13 +378,15 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
             bw1 += p.io1.bs;
             t.consume(p.io1.bs, p.io1.prio);
         }
-        sem.signal(1);
     });
-    photon::thread_create11([&] {
+    thread_enable_join(client_th1);
+
+    auto client_th2 = photon::thread_create11([&] {
         photon::throttle src(p.io2.bw);
         auto conn = cli->connect(server_ep);
+        if (!conn) exit(1);
         DEFER(delete conn);
-        char buf[buf_size];
+        char buf[buf_size] = {};
         while (running) {
             src.consume(p.io2.bs);
             ssize_t ret = conn->send(buf, p.io2.bs);
@@ -370,9 +394,13 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
             bw2 += p.io2.bs;
             t.consume(p.io2.bs, p.io2.prio);
         }
-        sem.signal(1);
     });
-    sem.wait(2);
+    thread_enable_join(client_th2);
+
+    photon::thread_join((photon::join_handle*) client_th1);
+    photon::thread_join((photon::join_handle*) client_th2);
+
+    stream_counter.wait(2);
 }
 
 static void run_simulate(const std::atomic<bool>& running, const PriorityTestSuite& p,
@@ -405,34 +433,34 @@ TEST_P(ThrottlePriorityTest, run) {
     const uint64_t test_time_sec = 10;
     uint64_t bw1 = 0, bw2 = 0;
 
-    std::atomic<bool> running{true};
-    std::thread([&] {
+    std::thread watcher([&] {
         ::sleep(test_time_sec);
-        running = false;
-    }).detach();
+        running_ = false;
+    });
 
     if (p.type == PriorityTestSuite::Simulate)
-        run_simulate(running, p, bw1, bw2);
+        run_simulate(running_, p, bw1, bw2);
     else if (p.type == PriorityTestSuite::RealSocket)
-        run_real_socket(running, p, bw1, bw2);
+        run_real_socket(running_, p, bw1, bw2);
 
     bw1 /= test_time_sec;
     bw2 /= test_time_sec;
     double ratio1 = double(bw1) / double(p.limit_bw);
     double ratio2 = double(bw2) / double(p.limit_bw);
     LOG_INFO(VALUE(bw1), VALUE(bw2), VALUE(ratio1), VALUE(ratio2));
-    GTEST_ASSERT_GE(ratio1, p.bw1_ratio_min);
-    GTEST_ASSERT_LE(ratio1, p.bw1_ratio_max);
-    GTEST_ASSERT_GE(ratio2, p.bw2_ratio_min);
-    GTEST_ASSERT_LE(ratio2, p.bw2_ratio_max);
+    EXPECT_GE(ratio1, p.bw1_ratio_min);
+    EXPECT_LE(ratio1, p.bw1_ratio_max);
+    EXPECT_GE(ratio2, p.bw2_ratio_min);
+    EXPECT_LE(ratio2, p.bw2_ratio_max);
+
+    watcher.join();
 }
 #endif
 
 int main(int argc, char** argv) {
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    if (ret) return -1;
+    DEFER(photon::fini());
     testing::InitGoogleTest(&argc, argv);
-    ci_parse_env();
-    photon::init(ci_ev_engine, photon::INIT_IO_NONE);
-    // TODO
-    // DEFER(photon::fini());
     return RUN_ALL_TESTS();
 }

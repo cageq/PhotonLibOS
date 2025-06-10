@@ -20,7 +20,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
+#include <memory>
 #include <thread>
 #include <utility>
 #ifndef __aarch64__
@@ -30,6 +30,8 @@ limitations under the License.
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
+
+#define size_t uint64_t
 
 template <size_t x>
 struct Capacity_2expN {
@@ -80,7 +82,7 @@ struct ThreadPause : PauseBase {
 };
 
 namespace photon {
-void thread_yield();
+int thread_yield();
 }
 struct PhotonPause : PauseBase {
     inline static __attribute__((always_inline)) void pause() {
@@ -88,16 +90,23 @@ struct PhotonPause : PauseBase {
     }
 };
 
+template <typename T>
+struct is_shared_ptr : std::false_type {};
+template <typename T>
+struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+
 template <typename T, size_t N>
 class LockfreeRingQueueBase {
 public:
 #if __cplusplus < 201402L
-    static_assert(std::has_trivial_copy_constructor<T>::value &&
-                      std::has_trivial_copy_assign<T>::value,
+    static_assert((std::has_trivial_copy_constructor<T>::value &&
+                   std::has_trivial_copy_assign<T>::value) ||
+                      is_shared_ptr<T>::value,
                   "T should be trivially copyable");
 #else
-    static_assert(std::is_trivially_copy_constructible<T>::value &&
-                      std::is_trivially_copy_assignable<T>::value,
+    static_assert((std::is_trivially_copy_constructible<T>::value &&
+                   std::is_trivially_copy_assignable<T>::value) ||
+                      is_shared_ptr<T>::value,
                   "T should be trivially copyable");
 #endif
 
@@ -179,7 +188,7 @@ public:
     using Base::empty;
     using Base::full;
 
-    bool push_weak(const T& x) {
+    bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
         for (;;) {
             auto& slot = slots[idx(t)];
@@ -192,15 +201,16 @@ public:
                 }
             } else {
                 auto const prevTail = t;
+                auto h = head.load(std::memory_order_acquire);
                 t = tail.load(std::memory_order_acquire);
-                if (t == prevTail) {
+                if (t == prevTail && Base::check_full(h, t)) {
                     return false;
                 }
             }
         }
     }
 
-    bool pop_weak(T& x) {
+    bool pop(T& x) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
             auto& slot = slots[idx(h)];
@@ -213,26 +223,13 @@ public:
                 }
             } else {
                 auto const prevHead = h;
+                auto t = tail.load(std::memory_order_acquire);
                 h = head.load(std::memory_order_acquire);
-                if (h == prevHead) {
+                if (h == prevHead && Base::check_empty(h, t)) {
                     return false;
                 }
             }
         }
-    }
-
-    bool push(const T& x) {
-        do {
-            if (push_weak(x)) return true;
-        } while (!full());
-        return false;
-    }
-
-    bool pop(T& x) {
-        do {
-            if (pop_weak(x)) return true;
-        } while (!empty());
-        return false;
     }
 
     template <typename Pause = ThreadPause>
@@ -296,65 +293,59 @@ public:
     using Base::empty;
     using Base::full;
 
-    size_t push_batch(const T* x, size_t n) {
+    size_t push_batch(const T *x, size_t n) {
         size_t rh, wt;
         wt = tail.load(std::memory_order_relaxed);
         for (;;) {
-            rh = head.load(std::memory_order_relaxed);
-            auto rn = std::min(n, Base::capacity - (wt - rh));
-            if (rn == 0) return 0;
-            if (tail.compare_exchange_strong(wt, wt + rn,
-                                             std::memory_order_acq_rel)) {
-                auto first_idx = idx(wt);
-                auto part_length = Base::capacity - first_idx;
-                if (likely(part_length >= rn)) {
-                    memcpy(&slots[first_idx], x, sizeof(T) * rn);
-                } else {
-                    if (likely(part_length))
-                        memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
-                    memcpy(&slots[0], x + part_length,
-                           sizeof(T) * (rn - part_length));
-                }
-                auto wh = wt;
-                while (!write_head.compare_exchange_weak(
-                    wh, wt + rn, std::memory_order_acq_rel)) {
-                    ThreadPause::pause();
-                    wh = wt;
-                }
-                return rn;
+            rh = head.load(std::memory_order_acquire);
+            auto wn = std::min(n, Base::capacity - (wt - rh));
+            if (wn == 0)
+                return 0;
+            if (!tail.compare_exchange_strong(wt, wt + wn, std::memory_order_acq_rel))
+                continue;
+            auto first_idx = idx(wt);
+            auto part_length = Base::capacity - first_idx;
+            if (likely(part_length >= wn)) {
+                memcpy(&slots[first_idx], x, sizeof(T) * wn);
+            } else {
+                if (likely(part_length))
+                    memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
+                memcpy(&slots[0], x + part_length, sizeof(T) * (wn - part_length));
             }
+            auto wh = wt;
+            while (!write_head.compare_exchange_strong(wh, wt + wn, std::memory_order_acq_rel))
+                wh = wt;
+            return wn;
         }
     }
 
-    bool push(const T& x) { return push_batch(&x, 1) == 1; }
+    bool push(const T &x) {
+        return push_batch(&x, 1) == 1;
+    }
 
-    size_t pop_batch(T* x, size_t n) {
+    size_t pop_batch(T *x, size_t n) {
         size_t rt, wh;
         rt = read_tail.load(std::memory_order_relaxed);
         for (;;) {
-            wh = write_head.load(std::memory_order_relaxed);
+            wh = write_head.load(std::memory_order_acquire);
             auto rn = std::min(n, wh - rt);
-            if (rn == 0) return 0;
-            if (read_tail.compare_exchange_strong(rt, rt + rn,
-                                                  std::memory_order_acq_rel)) {
-                auto first_idx = idx(rt);
-                auto part_length = Base::capacity - first_idx;
-                if (likely(part_length >= rn)) {
-                    memcpy(x, &slots[first_idx], sizeof(T) * rn);
-                } else {
-                    if (likely(part_length))
-                        memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
-                    memcpy(x + part_length, &slots[0],
-                           sizeof(T) * (rn - part_length));
-                }
-                auto rh = rt;
-                while (!head.compare_exchange_weak(rh, rt + rn,
-                                                   std::memory_order_acq_rel)) {
-                    ThreadPause::pause();
-                    rh = rt;
-                }
-                return rn;
+            if (rn == 0)
+                return 0;
+            if (!read_tail.compare_exchange_strong(rt, rt + rn, std::memory_order_acq_rel))
+                continue;
+            auto first_idx = idx(rt);
+            auto part_length = Base::capacity - first_idx;
+            if (likely(part_length >= rn)) {
+                memcpy(x, &slots[first_idx], sizeof(T) * rn);
+            } else {
+                if (likely(part_length))
+                    memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
+                memcpy(x + part_length, &slots[0], sizeof(T) * (rn - part_length));
             }
+            auto rh = rt;
+            while (!head.compare_exchange_strong(rh, rt + rn, std::memory_order_acq_rel))
+                rh = rt;
+            return rn;
         }
     }
 
@@ -454,7 +445,6 @@ public:
             n, Base::capacity - (t - head.load(std::memory_order_acquire)));
         if (n == 0) return 0;
         auto first_idx = idx(t);
-        auto last_idx = idx(t + n - 1);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
             memcpy(&slots[first_idx], x, sizeof(T) * n);
@@ -472,7 +462,6 @@ public:
         n = std::min(n, tail.load(std::memory_order_acquire) - h);
         if (n == 0) return 0;
         auto first_idx = idx(h);
-        auto last_idx = idx(h + n - 1);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
             memcpy(x, &slots[first_idx], sizeof(T) * n);
@@ -536,8 +525,8 @@ namespace common {
  * and load balancing.
  * Watch out that `recv` should run in photon environment (because it has to)
  * use photon semaphore to be notified that new item has sended. `send` could
- * running in photon or std::thread environment (needs to set template `Pause` as
- * `ThreadPause`).
+ * running in photon or std::thread environment (needs to set template `Pause`
+ * as `ThreadPause`).
  *
  * @tparam QueueType shoulde be one of LockfreeMPMCRingQueue,
  * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
@@ -571,7 +560,8 @@ public:
         while (!push(x)) {
             Pause::pause();
         }
-        if (idler.load(std::memory_order_acquire)) queue_sem.signal(1);
+        // meke sure that idler load happends after push work done.
+        if (idler.load(std::memory_order_seq_cst)) queue_sem.signal(1);
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
@@ -601,3 +591,6 @@ public:
 
 }  // namespace common
 }  // namespace photon
+
+#undef size_t
+

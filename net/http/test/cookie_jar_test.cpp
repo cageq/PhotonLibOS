@@ -21,7 +21,6 @@ limitations under the License.
 #undef private
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <time.h>
 
 #include <chrono>
@@ -34,6 +33,7 @@ limitations under the License.
 #include <iostream>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include "../../../test/gtest.h"
 
 using namespace photon;
 using namespace photon::net;
@@ -49,7 +49,7 @@ public:
 };
 
 ResponseHeaderAdaptor* new_resp(std::string text) {
-    text = "HTTP/1.1 200 ok\r\nSet-Cookies: " + text + "\r\n\r\n";
+    text = "HTTP/1.1 200 ok\r\nSet-Cookie: " + text + "\r\n\r\n";
     ResponseHeaderAdaptor *ret = new ResponseHeaderAdaptor();
     memcpy(ret->m_buf, text.data(), text.size());
     ret->append_bytes(text.size());
@@ -62,7 +62,7 @@ std::string get_cookie(SimpleCookieJar *jar, std::string host) {
     jar->set_cookies_to_headers(&tmp_headers);
     auto cookie = tmp_headers.headers["Cookie"];
     LOG_DEBUG(VALUE(cookie));
-    return std::string(tmp_headers.headers["Cookie"]);
+    return string(cookie);
 }
 
 TEST(cookie_jar, basic) {
@@ -73,14 +73,14 @@ TEST(cookie_jar, basic) {
     auto s = get_cookie(&c, "host1");
     LOG_INFO(VALUE(s));
     EXPECT_EQ(true, s == "key=value");
-    auto resp2 = new_resp("__Host-key1=value1; para1; para2");
+    auto resp2 = new_resp("__Host-key1=value1; para1; para2; Secure");
     DEFER(delete resp2);
     c.get_cookies_from_headers("host1", resp2);
     s = get_cookie(&c, "host1");
     estring_view esv(s);
-    EXPECT_EQ(true, esv.find("key1=value1") != string_view::npos);
+    EXPECT_EQ(true, esv.find("__Host-key1=value1") != string_view::npos);
     EXPECT_EQ(true, esv.find("key=value") != string_view::npos);
-    auto resp3 = new_resp("__Host-key1=value1_new; para1; para2; Expires=Wed, 24 Nov 3040 09:55:55");
+    auto resp3 = new_resp("__Host-key1=value1_new; para1; para2; Secure; Expires=Wed, 24 Nov 3040 09:55:55");
     DEFER(delete resp3);
     auto resp4 = new_resp("key1=value1_host2");
     DEFER(delete resp4);
@@ -88,13 +88,14 @@ TEST(cookie_jar, basic) {
     c.get_cookies_from_headers("host2", resp4);
     s = get_cookie(&c, "host1");
     esv = estring_view(s);
-    EXPECT_EQ(true, esv.find("key1=value1_new") != string_view::npos);
+    EXPECT_EQ(true, esv.find("__Host-key1=value1_new") != string_view::npos);
     EXPECT_EQ(true, esv.find("key=value") != string_view::npos);
     EXPECT_EQ(true, esv.find("key1=value1_host2") == string_view::npos);
-    auto resp5 = new_resp("__Host-key1=value1_expired; para1; para2; Expires=Wed, 24 Nov 2020 09:55:55");
+    auto resp5 = new_resp("__Host-key1=value1_expired; para1; para2; Secure; Expires=Wed, 24 Nov 2020 09:55:55");
     DEFER(delete resp5);
     c.get_cookies_from_headers("host1", resp5);
     s = get_cookie(&c, "host1");
+    LOG_DEBUG(VALUE(s));
     EXPECT_EQ(true, s == "key=value");
 }
 

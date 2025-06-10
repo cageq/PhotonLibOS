@@ -96,10 +96,11 @@ public:
     ssize_t write(const void *buf, size_t count) override;
     ssize_t writev(const struct iovec *iov, int iovcnt) override;
     ssize_t write_stream(IStream *stream, size_t size_limit = -1);
+    int close() override { return 0; }
 
-    // size of body
+    // size of body: infer from Content-Range/Content-Length in response header
     size_t body_size() const;
-    // size of origin resource
+    // size of origin resource: infer from Content-Range/Content-Length in response header
     ssize_t resource_size() const;
 
     // in general, it is called automatically
@@ -130,7 +131,6 @@ protected:
     int append_bytes(uint16_t size);
 
     int skip_remain();
-    int close() override { return 0; }
 
     std::string_view partial_body() const {
         return std::string_view{m_buf, m_buf_size} | m_body;

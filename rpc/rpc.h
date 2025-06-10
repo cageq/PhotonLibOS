@@ -57,17 +57,22 @@ namespace rpc
     class Stub : public Object {
     public:
         /**
+         * @brief Stub is the entity to send RPC calls. It is based on socket stream.
+         *        A stub can be created via `new_rpc_stub(IStream*)`, and can be retrieved from `StubPool`.
          * @param req Request of Message
          * @param resp Response of Message
+         * @param timeout RPC timeout, counting from sending request to receiving response header
          * @return The number of bytes received, -1 for failure
          * @note Request and Response should assign to external memory buffers if they have variable-length fields.
          *       Via this, we can achieve zero-copy send and receive.
          *       For Response, there could be only 1 buffer at most. For Request, there is no limit.
+         *       Attention: RPC stub do not support multi vCPU, when multiple vCPUs are used, the RPC stub should be
+         *       vCPU local object.
          */
         template<typename Operation>
         int call(typename Operation::Request& req,
                  typename Operation::Response& resp,
-                 uint64_t timeout = -1UL)
+                 Timeout timeout = {})
         {
             SerializerIOV reqmsg;
             reqmsg.serialize(req);
@@ -107,6 +112,7 @@ namespace rpc
         /**
          * @param req Request of Message
          * @param resp_iov iovector for the Response
+         * @param timeout timeout in milliseconds, -1UL for no timeout. 
          * @return Pointer of the Response. nullptr for failure. No need to delete.
          * @note For this call, we don't need to assign buffers for the Response any more.
          *       `resp_iov` will use its internal allocator to fulfill the memory requirement.
@@ -114,7 +120,7 @@ namespace rpc
          */
         template<typename Operation>
         typename Operation::Response* call(typename Operation::Request& req, iovector& resp_iov,
-                                            uint64_t timeout = -1UL) {
+                                            Timeout timeout = {}) {
             assert(resp_iov.iovcnt() == 0);
             SerializerIOV reqmsg;
             reqmsg.serialize(req);
@@ -136,9 +142,12 @@ namespace rpc
     protected:
         // This call can be invoked concurrently, and may return out-of-order.
         // Return the number of bytes received.
-        virtual int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) = 0;
+        virtual int do_call(FunctionID function, iovector* request, iovector* response, Timeout timeout) = 0;
     };
 
+    /**
+     * @brief Skeleton is the entity of RPC server
+     */
     class Skeleton : public Object
     {
     public:
@@ -160,7 +169,12 @@ namespace rpc
         virtual int set_accept_notify(Notifier notifier) = 0;
         virtual int set_close_notify(Notifier notifier) = 0;
 
-        // can be invoked concurrently by multiple threads
+        /**
+         * @brief The main logic to handle incoming RPC calls. Users can invoke this function
+         *        inside the custom `Handler` of `ISocketServer`. Multiple socket servers
+         *        are supported, for example, `new_tcp_socket_server()`, `new_uds_server()` ...
+         * @note Can be invoked concurrently by multiple threads
+         */
         virtual int serve(IStream* stream) = 0;
 
         __attribute__((deprecated))
@@ -225,6 +239,16 @@ namespace rpc
         }
     };
 
+    /**
+     * @brief StubPool is the general user-interface of RPC client. It uses an ObjectCache
+     *        to manage multiple Stubs based on their network Endpoints.
+     *
+     * @note About timeout:
+     *  1. When a socket/stub not used by any caller for `expiration` microsecs, it will be dropped.
+     *  2. When socket connecting, it will fail by be timed out after `connect_timeout` microsecs.
+     *  3. `Stub::call` measures the time from invoking `call` before sending request to received
+     *    response head. Receiving response body is not considered.
+     */
     class StubPool : public Object {
     public:
         // Get a RPC stub(client) from expire-container, which is a connection pool.
@@ -243,84 +267,21 @@ namespace rpc
     };
 
     extern "C" Stub* new_rpc_stub(IStream* stream, bool ownership = false);
-    extern "C" StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout);
-    extern "C" StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
-                                uint64_t connect_timeout,
-                                uint64_t rpc_timeout);
+
+    extern "C" StubPool* new_stub_pool(uint64_t expiration,
+                                       uint64_t timeout,
+                                       std::shared_ptr<net::ISocketClient> socket_client = nullptr);
+
+    extern "C" StubPool* new_uds_stub_pool(const char* path,
+                                           uint64_t expiration,
+                                           uint64_t timeout);
+
     extern "C" Skeleton* new_skeleton(uint32_t pool_size = 128);
 
     __attribute__((deprecated))
-    inline Skeleton* new_skeleton(bool /*concurrent*/, uint32_t pool_size = 128) {
+    inline Skeleton* new_skeleton(bool /*concurrent*/, uint32_t pool_size) {
         return new_skeleton(pool_size);
     }
 
-    struct __example__operation1__   // defination of operator
-    {
-        const static uint32_t IID = 0x1234;
-        const static uint32_t FID = 0x5678;
-        struct Request : public Message
-        {
-            int x;
-            PROCESS_FIELDS(x);
-        };
-        struct Response : public Message
-        {
-            int y;
-            PROCESS_FIELDS(y);
-        };
-    };
-
-    struct __example__operation2__   // defination of operator
-    {
-        const static uint32_t IID = 0x1234;
-        const static uint32_t FID = 0x5678;
-        struct Request : public Message
-        {
-            int x;
-            PROCESS_FIELDS(x);
-        };
-        struct Response : public Message
-        {
-            int y;
-            PROCESS_FIELDS(y);
-        };
-    };
-
-    inline void __example_of_rpc__()
-    {   // client side example
-        using Op1 = __example__operation1__;
-        using Op2 = __example__operation2__;
-        {
-            Stub* stub = nullptr;
-            Op1::Request req1;
-            Op1::Response resp1;
-            stub->call<Op1>(req1, resp1);
-            Op2::Request req2;
-            Op2::Response resp2;
-            stub->call<Op2>(req2, resp2);
-        }
-
-        // server side example
-        class ServerClass
-        {
-        public:
-            Skeleton* sk = nullptr;
-            ServerClass()
-            {   // registration server function(s)
-                sk->register_service<Op1>(this);
-                sk->register_service<Op2>(this);
-            }
-            int do_rpc_service(Op1::Request* req, Op1::Response* resp, iovector* iov, IStream*)
-            {   // impl of server function(s)
-                resp->y = req->x;
-                return 0;
-            }
-            int do_rpc_service(Op2::Request* req, Op2::Response* resp, iovector* iov, IStream*)
-            {   // impl of server function(s)
-                resp->y = req->x;
-                return 0;
-            }
-        };
-    }
 }
 }

@@ -76,17 +76,21 @@ public:
         OpenSSL_add_all_ciphers();
         OpenSSL_add_all_digests();
         OpenSSL_add_all_algorithms();
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
         mtx.clear();
         for (int i = 0; i < CRYPTO_num_locks(); i++) {
             mtx.emplace_back(std::make_unique<photon::mutex>());
         }
-        CRYPTO_set_id_callback(&GlobalSSLContext ::threadid_callback);
+        CRYPTO_set_id_callback(&GlobalSSLContext::threadid_callback);
         CRYPTO_set_locking_callback(&GlobalSSLContext::lock_callback);
+#endif
     }
 
     ~GlobalSSLContext() {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
         CRYPTO_set_id_callback(NULL);
         CRYPTO_set_locking_callback(NULL);
+#endif
     }
 };
 
@@ -170,9 +174,19 @@ public:
         }
         return 0;
     }
+
+    int set_verify_mode(VerifyMode mode) override {
+        SSL_CTX_set_default_verify_paths(ctx);
+        SSL_CTX_set_verify(ctx, (int)mode, nullptr);
+        return 0;
+    }
 };
 
-void __OpenSSLGlobalInit() { (void)GlobalSSLContext::getInstance(); }
+void __OpenSSLGlobalInit() {
+#ifdef PHOTON_GLOBAL_INIT_OPENSSL
+    (void)GlobalSSLContext::getInstance();
+#endif
+}
 
 TLSContext* new_tls_context(const char* cert_str, const char* key_str,
                             const char* passphrase, TLSVersion version) {
@@ -343,8 +357,33 @@ public:
         SSL_free(ssl);
     }
 
+    void deal_error() {
+        int err = 0;
+        while ((err = ERR_get_error())) {
+            LOG_ERROR("SSL error: `", ERR_error_string(err, nullptr));
+            switch (ERR_GET_REASON(err)) {
+                case ERR_R_BIO_LIB:
+                    errno = ECONNRESET;
+                    break;
+                case ERR_R_FATAL:
+                case ERR_R_MALLOC_FAILURE:
+                case ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED:
+                case ERR_R_PASSED_NULL_PARAMETER:
+                case ERR_R_INTERNAL_ERROR:
+                case ERR_R_DISABLED:
+                    errno = EIO;
+                    break;
+                default:
+                    errno = EPERM;
+                    break;
+            }
+        }
+    }
+
     ssize_t recv(void* buf, size_t cnt, int flags = 0) override {
-        return SSL_read(ssl, buf, cnt);
+        auto ret = SSL_read(ssl, buf, cnt);
+        if (ret < 0) deal_error();
+        return ret;
     }
 
     ssize_t recv(const struct iovec* iov, int iovcnt, int flags = 0) override {
@@ -352,7 +391,9 @@ public:
         return recv(iov[0].iov_base, iov[0].iov_len);
     }
     ssize_t send(const void* buf, size_t cnt, int flags = 0) override {
-        return SSL_write(ssl, buf, cnt);
+        auto ret = SSL_write(ssl, buf, cnt);
+        if (ret < 0) deal_error();
+        return ret;
     }
     ssize_t send(const struct iovec* iov, int iovcnt, int flags = 0) override {
         // since send allows partial write

@@ -30,8 +30,6 @@ limitations under the License.
 
 #include <thread>
 #include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -52,12 +50,14 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
-
+#include "../../test/gtest.h"
 #include "mock.h"
 
 using namespace std;
 using namespace photon;
 using namespace photon::fs;
+
+#pragma GCC diagnostic ignored "-Wsign-compare"
 
 TEST(Path, split)
 {
@@ -165,19 +165,19 @@ TEST(Tree, node)
     node.creat(k1234, (void*)1234);
     node.creat(k1234, (void*)2345);
     node.creat(k1234, v1234);
-    EXPECT_EQ(node.size(), 5);
+    EXPECT_EQ(node.size(), 5ul);
 
     for (auto x: subnodes)
         node.mkdir(x);
 
-    EXPECT_EQ(node.size(), 9);
+    EXPECT_EQ(node.size(), 9ul);
 
     f = F;
     void* v;
     for (auto x: items)
     {
         node.read(x, &v);
-        EXPECT_EQ(v, (void*)f++);
+        EXPECT_EQ(v, (void*)f); f++;
         node.unlink(x);
         EXPECT_FALSE(node.is_file(x));
     }
@@ -571,12 +571,17 @@ TEST(AsyncFS, AsyncFS)
     tafs.do_test(f);
 }
 
+#if __cplusplus < 202000
+#define CAPTURE =
+#else
+#define CAPTURE =,this
+#endif
 class AFile : public ExampleAsyncFile
 {
 public:
     OVERRIDE_ASYNC(ssize_t, pread, void *buf, size_t count, off_t offset)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::sleep(1);
             callback_umimplemented<ssize_t>(done);
@@ -588,7 +593,7 @@ public:
     {
         LOG_DEBUG("into afile pwrite `", timeout);
 
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             //only return count/2 for timeout fired
@@ -604,7 +609,7 @@ class ExampleAsyncDir: public AsyncDIR {
     OVERRIDE_ASYNC0(int, closedir) {
     }
     OVERRIDE_ASYNC0(dirent*, get) {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             AsyncResult<dirent*> r;
@@ -631,7 +636,7 @@ class AFS : public ExampleAsyncFileSystem {
 public:
     OVERRIDE_ASYNC(IAsyncFile*, open, const char *pathname, int flags)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             callback(done, UINT32_MAX, exampleAfile, 0);
         });
@@ -640,7 +645,7 @@ public:
 
     OVERRIDE_ASYNC(AsyncDIR*, opendir, const char *name)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             if (name[0] == 's') {
@@ -710,6 +715,8 @@ void *(*old_malloc)(size_t size, const void *caller);
 void *my_malloc(size_t size, const void *caller);
 void my_free(void *ptr, const void *caller);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void malloc_hook() {
     __malloc_hook = my_malloc;
     __free_hook = my_free;
@@ -724,6 +731,7 @@ void init_hook() {
     old_malloc = __malloc_hook;
     old_free = __free_hook;
 }
+#pragma GCC diagnostic pop
 
 void *my_malloc(size_t size, const void *caller) {
     return nullptr;
@@ -743,8 +751,8 @@ TEST(range_split, sub_range)
     EXPECT_FALSE(sr);
     sr.assign(0, 233, 1024);
     EXPECT_TRUE(sr);
-    EXPECT_EQ(233, sr.begin());
-    EXPECT_EQ(233+1024, sr.end());
+    EXPECT_EQ(233ul, sr.begin());
+    EXPECT_EQ(233ul+1024ul, sr.end());
     sr.clear();
     EXPECT_FALSE(sr);
     sr.assign(1, 233, 1024);
@@ -757,25 +765,25 @@ TEST(range_split, range_split_simple_case)
     // with abegin, aend as 0, 11
     // 11 parts in total
     EXPECT_FALSE(split.small_note);
-    EXPECT_EQ(42, split.begin);
-    EXPECT_EQ(363, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(2, split.apbegin);
-    EXPECT_EQ(split.apend,11);
-    EXPECT_EQ(32, split.aligned_begin_offset());
-    EXPECT_EQ(384, split.aligned_end_offset());
+    EXPECT_EQ(42ul, split.begin);
+    EXPECT_EQ(363ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(2ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
+    EXPECT_EQ(32ul, split.aligned_begin_offset());
+    EXPECT_EQ(384ul, split.aligned_end_offset());
     auto p = split.all_parts();
-    EXPECT_EQ(1, p.begin()->i);
-    EXPECT_EQ(10, p.begin()->begin());
-    EXPECT_EQ(32, p.begin()->end());
-    EXPECT_EQ(12, p.end()->i);
-    int cnt = 1;
+    EXPECT_EQ(1ul, p.begin()->i);
+    EXPECT_EQ(10ul, p.begin()->begin());
+    EXPECT_EQ(32ul, p.begin()->end());
+    EXPECT_EQ(12ul, p.end()->i);
+    uint64_t cnt = 1;
     for (auto &rs: p) {
         EXPECT_EQ(cnt++, rs.i);
         if (rs != p.begin() && rs != p.end()) {
-            EXPECT_EQ(0, rs.begin());
-            EXPECT_EQ(32, rs.end());
+            EXPECT_EQ(0ul, rs.begin());
+            EXPECT_EQ(32ul, rs.end());
         }
     }
     split = fs::range_split(2, 12, 24);
@@ -793,27 +801,27 @@ TEST(range_split, range_split_aligned_case)
     // it should be split into [begin, end) as [32, 64)+[64, 76) +... +[352,353)
     // with abegin, aend as 0, 11
     // 11 parts in total
-    EXPECT_EQ(32, split.begin);
-    EXPECT_EQ(353, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(1, split.apbegin);
-    EXPECT_EQ(11, split.apend);
+    EXPECT_EQ(32ul, split.begin);
+    EXPECT_EQ(353ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(1ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
     auto p = split.all_parts();
     EXPECT_FALSE(split.is_aligned());
     EXPECT_TRUE(split.is_aligned(128));
     EXPECT_TRUE(split.is_aligned_ptr((const void*)(uint64_t(65536))));
-    EXPECT_EQ(1, p.begin()->i);
-    EXPECT_EQ(0, p.begin()->begin());
-    EXPECT_EQ(32, p.begin()->end());
-    EXPECT_EQ(12, p.end()->i);
-    EXPECT_EQ(352, split.aligned_length());
+    EXPECT_EQ(1ul, p.begin()->i);
+    EXPECT_EQ(0ul, p.begin()->begin());
+    EXPECT_EQ(32ul, p.begin()->end());
+    EXPECT_EQ(12ul, p.end()->i);
+    EXPECT_EQ(352ul, split.aligned_length());
     auto q = split.aligned_parts();
-    int cnt = 1;
+    uint64_t cnt = 1;
     for (auto &rs: q) {
         EXPECT_EQ(cnt++, rs.i);
-        EXPECT_EQ(0, rs.begin());
-        EXPECT_EQ(32, rs.end());
+        EXPECT_EQ(0ul, rs.begin());
+        EXPECT_EQ(32ul, rs.end());
     }
     split = fs::range_split(0, 23, 24);
     EXPECT_TRUE(split.postface);
@@ -842,25 +850,25 @@ TEST(range_split_power2, basic) {
         LOG_DEBUG(rs.i, ' ', rs.begin(), ' ', rs.end());
     }
     EXPECT_FALSE(split.small_note);
-    EXPECT_EQ(42, split.begin);
-    EXPECT_EQ(363, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(2, split.apbegin);
-    EXPECT_EQ(11, split.apend);
-    EXPECT_EQ(32, split.aligned_begin_offset());
-    EXPECT_EQ(384, split.aligned_end_offset());
+    EXPECT_EQ(42ul, split.begin);
+    EXPECT_EQ(363ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(2ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
+    EXPECT_EQ(32ul, split.aligned_begin_offset());
+    EXPECT_EQ(384ul, split.aligned_end_offset());
     auto p = split.all_parts();
-    EXPECT_EQ(p.begin()->i, 1);
-    EXPECT_EQ(p.begin()->begin(), 10);
-    EXPECT_EQ(p.begin()->end(), 32);
-    EXPECT_EQ(p.end()->i, 12);
-    int cnt = 1;
+    EXPECT_EQ(p.begin()->i, 1ul);
+    EXPECT_EQ(p.begin()->begin(), 10ul);
+    EXPECT_EQ(p.begin()->end(), 32ul);
+    EXPECT_EQ(p.end()->i, 12ul);
+    uint64_t cnt = 1;
     for (auto &rs: p) {
         EXPECT_EQ(rs.i, cnt++);
         if (rs != p.begin() && rs != p.end()) {
-            EXPECT_EQ(rs.begin(), 0);
-            EXPECT_EQ(rs.end(), 32);
+            EXPECT_EQ(rs.begin(), 0ul);
+            EXPECT_EQ(rs.end(), 32ul);
         }
     }
 }
@@ -870,7 +878,7 @@ TEST(range_split_power2, random_test) {
     offset = rand();
     length = rand();
     auto interval_shift = rand()%32 + 1;
-    interval = 1<<interval_shift;
+    interval = uint64_t(1) << interval_shift;
     fs::range_split_power2 split(offset, length, interval);
     EXPECT_EQ(offset, split.begin);
     EXPECT_EQ(offset + length, split.end);
@@ -886,15 +894,15 @@ TEST(range_split_vi, basic) {
     uint64_t kp[] = {0, 32, 64, 128, 256, 512, UINT64_MAX};
     fs::range_split_vi split(12, 321, kp, 7);
     uint64_t *it = kp;
-    EXPECT_EQ(12, split.begin);
-    EXPECT_EQ(333, split.end);
-    EXPECT_TRUE(split.is_aligned((uint64_t)0));
-    EXPECT_FALSE(split.is_aligned(1));
-    EXPECT_TRUE(split.is_aligned(128));
+    EXPECT_EQ(12ul, split.begin);
+    EXPECT_EQ(333ul, split.end);
+    EXPECT_TRUE(split.is_aligned(0ul));
+    EXPECT_FALSE(split.is_aligned(1ul));
+    EXPECT_TRUE(split.is_aligned(128ul));
     for (auto p : split.all_parts()) {
         LOG_DEBUG(p.i, ' ', p.begin(), ' ', p.end());
-        EXPECT_EQ(*it == 0?12:0, p.begin());
-        EXPECT_EQ(*it == 256? 321-256+12 :(*(it+1) - *it), p.end());
+        EXPECT_EQ(*it == 0ul ? 12ul : 0ul, p.begin());
+        EXPECT_EQ(*it == 256ul ? 321ul-256ul+12ul : (*(it+1) - *it), p.end());
         it++;
     }
     uint64_t kpfail[] = {0, 32, 796, 128, 256, 512, UINT64_MAX};
@@ -911,14 +919,14 @@ TEST(range_split_vi, left_side_aligned) {
     uint64_t kp[] = {0, 32, 64, 128, 256, 512, UINT64_MAX};
     fs::range_split_vi split(0, 256, kp, 7);
     uint64_t *it = kp;
-    EXPECT_EQ(0, split.begin);
-    EXPECT_EQ(256, split.end);
-    EXPECT_TRUE(split.is_aligned((uint64_t)0));
-    EXPECT_FALSE(split.is_aligned(1));
-    EXPECT_TRUE(split.is_aligned(128));
+    EXPECT_EQ(0ul, split.begin);
+    EXPECT_EQ(256ul, split.end);
+    EXPECT_TRUE(split.is_aligned(0ul));
+    EXPECT_FALSE(split.is_aligned(1ul));
+    EXPECT_TRUE(split.is_aligned(128ul));
     for (auto p : split.all_parts()) {
         LOG_DEBUG(p.i, ' ', p.begin(), ' ', p.end());
-        EXPECT_EQ(0, p.begin());
+        EXPECT_EQ(0ul, p.begin());
         EXPECT_EQ((*(it+1) - *it), p.end());
         it++;
     }
@@ -938,20 +946,21 @@ std::unique_ptr<char[]> random_block(uint64_t size) {
     while (size--) {
         *(p++) = rand() % UCHAR_MAX;
     }
-    return std::move(buff);
+    return buff;
 }
 
 void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, fs::IFile* file) {
     vector<std::unique_ptr<char[]>> rand_data;
     file->lseek(0, SEEK_SET);
-    for (auto i = 0; i< test_block_num; i++) {
-        rand_data.emplace_back(std::move(random_block(test_block_size)));
+    for (uint64_t i = 0; i < test_block_num; i++) {
+        rand_data.emplace_back(random_block(test_block_size));
         char * buff = rand_data.back().get();
         file->write(buff, test_block_size);
     }
     file->fsync();
     file->lseek(0, SEEK_SET);
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     for (const auto &data : rand_data) {
         file->read(buff, test_block_size);
         EXPECT_EQ(0, memcmp(data.get(), buff, test_block_size));
@@ -959,16 +968,18 @@ void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, f
 }
 
 void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num, const char* test_seq, fs::IFile* file) {
-    char data[test_block_size];
+    auto data = malloc(test_block_size);
+    DEFER(free(data));
     file->lseek(0, SEEK_SET);
-    for (auto i = 0; i< test_block_num; i++) {
+    for (auto i: xrange(test_block_num)) {
         memset(data, test_seq[i], test_block_size);
         file->write(data, test_block_size);
     }
     file->fdatasync();
     file->lseek(0, SEEK_SET);
-    char buff[test_block_size];
-    for (auto i = 0; i< test_block_num; i++) {
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
+    for (uint64_t i = 0; i< test_block_num; i++) {
         file->read(buff, test_block_size);
         memset(data, *(test_seq++), test_block_size);
         EXPECT_EQ(0, memcmp(data, buff, test_block_size));
@@ -978,7 +989,7 @@ void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num
 void xfile_fstat_test(uint64_t fsize, fs::IFile* file) {
     struct stat st;
     file->fstat(&st);
-    EXPECT_EQ(fsize, st.st_size);
+    EXPECT_EQ(fsize, (uint64_t)st.st_size);
 }
 
 void xfile_not_impl_test(fs::IFile* file) {
@@ -1002,7 +1013,7 @@ TEST(XFile, fixed_size_linear_file_basic) {
     const uint64_t test_block_size = 3986;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_fixed_size_linear_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
     }
     std::unique_ptr<IFile> xf(new_fixed_size_linear_file(test_block_size, lf, test_file_num, true));
@@ -1014,7 +1025,8 @@ TEST(XFile, fixed_size_linear_file_basic) {
     sequence_content_rw_test(test_block_size, test_file_num, "abcdefghijklmn", xf.get());
     random_content_rw_test(test_block_size, test_file_num, xf.get());
     xf->lseek(test_block_size*test_file_num, SEEK_SET);
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     log_output = log_output_null;
     DEFER({
         log_output = log_output_stdout;
@@ -1037,7 +1049,7 @@ TEST(XFile, linear_file_basic) {
     for (auto x : test_file_size) file_max_limit += x;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_linear_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
         lf[i]->ftruncate(test_file_size[i]);
     }
@@ -1073,7 +1085,7 @@ TEST(XFile, stripe_file_basic) {
     const uint64_t test_block_size = 128;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_stripe_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
         lf[i]->ftruncate(test_file_size);
     }
@@ -1085,7 +1097,8 @@ TEST(XFile, stripe_file_basic) {
     xfile_not_impl_test(xf.get());
     sequence_content_rw_test(test_file_size, test_file_num, "abcdefghijklmn", xf.get());
     random_content_rw_test(test_file_size, test_file_num, xf.get());
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     log_output = log_output_null;
     DEFER({
         log_output = log_output_stdout;
@@ -1308,6 +1321,7 @@ TEST(range_split_vi, special_case) {
                 &kp[0],
                 kp.size()
         );
+        (void)iovsplit;
         cnt++;
         ASSERT_LT(1, cnt);
     }
@@ -1340,6 +1354,7 @@ TEST(Walker, basic) {
   DEFER(delete srcFs);
 
   for (auto file : enumerable(Walker(srcFs, ""))) {
+    (void)file;
     EXPECT_FALSE(true);
   }
 
@@ -1357,6 +1372,7 @@ TEST(Walker, basic) {
   std::system(std::string("touch " + root + file2).c_str());
   int count = 0;
   for (auto file : enumerable(Walker(srcFs, "/"))) {
+    LOG_INFO(VALUE(file.data()));
     if (file.back() == '2') {
       EXPECT_EQ(0, strcmp(file.data(), file2.c_str()));
     } else {
@@ -1368,13 +1384,9 @@ TEST(Walker, basic) {
 }
 
 int main(int argc, char **argv){
+    srand(time(nullptr));
     ::testing::InitGoogleTest(&argc, argv);
-#ifdef __linux__
-    int ev_engine = photon::INIT_EVENT_EPOLL;
-#else
-    int ev_engine = photon::INIT_EVENT_KQUEUE;
-#endif
-    if (photon::init(ev_engine, photon::INIT_IO_NONE))
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());
     return RUN_ALL_TESTS();

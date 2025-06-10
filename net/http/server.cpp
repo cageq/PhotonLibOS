@@ -31,6 +31,7 @@ limitations under the License.
 #include "client.h"
 #include "message.h"
 #include "body.h"
+#include <atomic>
 
 
 #ifndef MSG_MORE
@@ -65,8 +66,9 @@ public:
     } status = Status::running;
 
     HandlerRecord m_default_handler = {"", nullptr, false, {this, &HTTPServerImpl::not_found_handler}};
-    uint64_t m_workers = 0;
+    std::atomic<uint64_t> m_workers{0};
     intrusive_list<SockItem> m_connection_list;
+    photon::spinlock m_connection_list_lock;
     std::vector<HandlerRecord> m_handlers;
 
     HTTPServerImpl() {}
@@ -107,8 +109,14 @@ public:
         m_workers++;
         DEFER(m_workers--);
         SockItem sock_item(sock);
-        m_connection_list.push_back(&sock_item);
-        DEFER(m_connection_list.erase(&sock_item));
+        {
+            SCOPED_LOCK(m_connection_list_lock);
+            m_connection_list.push_back(&sock_item);
+        }
+        DEFER({
+            SCOPED_LOCK(m_connection_list_lock);
+            m_connection_list.erase(&sock_item);
+        });
 
         char req_buf[64*1024];
         char resp_buf[64*1024];
@@ -188,24 +196,25 @@ public:
         DEFER(LOG_DEBUG("leave fs handler"));
         auto target = req.target();
         auto pos = target.find("?");
-        std::string query;
+        estring_view query;
         if (pos != std::string_view::npos) {
-            query = std::string(target.substr(pos + 1));
+            query = target.substr(pos + 1);
             target = target.substr(0, pos);
         }
-        estring filename(target);
 
+        estring_view filename(target);
         if (!prefix.empty())
             filename = filename.substr(prefix.size() - 1);
 
         LOG_DEBUG(VALUE(filename));
-        auto file = m_fs->open(filename.c_str(), O_RDONLY);
+        auto file = m_fs->open(filename.extract_c_str(), O_RDONLY);
         if (!file) {
             failed_resp(resp);
             LOG_ERROR_RETURN(0, 0, "open file ` failed", target);
         }
         DEFER(delete file);
-        if (!query.empty()) file->ioctl(fs::HTTP_URL_PARAM, query.c_str());
+        if (!query.empty())
+            file->ioctl(fs::HTTP_URL_PARAM, (const char*) query.extract_c_str());
 
         struct stat buf;
         if (file->fstat(&buf) < 0) {
@@ -292,7 +301,7 @@ public:
                      client, client_ownership) {}
 
     int tunnel_copy(ISocketStream *src, ISocketStream *dst) {
-        size_t buf_size = 65536;
+        const size_t buf_size = 65536;
         char seg_buf[buf_size + 4096];
         char *aligned_buf = (char*) (((uint64_t)(&seg_buf[0]) + 4095) / 4096 * 4096);
 

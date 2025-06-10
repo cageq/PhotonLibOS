@@ -288,16 +288,20 @@ public:
     virtual int cancel_wait() override { return eventfd_write(evfd, 1); }
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+        if (interests == 0) return 0;
         Event waiter{fd, interests | ONE_SHOT, CURRENT};
         Event event{fd, interests | ONE_SHOT, &waiter};
         int ret = add_interest(event);
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
+        SCOPED_PAUSE_WORK_STEALING;
         ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // Event arrived
         }
         rm_interest(event);
+        // fire events in case of event during notify
+        wait_and_fire_events(0);
         if (ret == 0) {
             errno = ETIMEDOUT;
             return -1;

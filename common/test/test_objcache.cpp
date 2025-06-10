@@ -18,14 +18,17 @@ limitations under the License.
 #define private public
 
 #include "../expirecontainer.h"
+#include "../objectcachev2.h"
 
 #undef private
 #undef protected
-#include <gtest/gtest.h>
-#include <photon/thread/thread.h>
-#include <photon/common/alog.h>
 
 #include <thread>
+#include <gtest/gtest.h>
+#include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
+#include <photon/common/alog.h>
+#include "../../test/ci-tools.h"
 
 static int thread_local release_cnt = 0;
 struct ShowOnDtor {
@@ -68,8 +71,6 @@ void* objcache(void* arg) {
 }
 
 TEST(ObjectCache, release_cycle) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -93,14 +94,12 @@ TEST(ObjectCache, release_cycle) {
 
 TEST(ObjectCache, timeout_refresh) {
     release_cnt = 0;
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
     // 1s
     auto ctor = [] { return new ShowOnDtor(0); };
-    auto ret = ocache.acquire(0, ctor);
+    auto ret = ocache.acquire(0, ctor); (void)ret;
     photon::thread_usleep(1100UL * 1000);
     ocache.expire();
     ocache.release(0);
@@ -129,8 +128,6 @@ void *ph_act(void *arg) {
 
 TEST(ObjectCache, ctor_may_yield_and_null) {
     release_cnt = 0;
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
@@ -141,16 +138,14 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
         photon::thread_create(&ph_act, &a);
     }
     sem.wait(10);
-    EXPECT_EQ(1, ocache._set.size());
+    EXPECT_EQ(1UL, ocache._set.size());
     ocache.expire();
     photon::thread_usleep(1100UL * 1000);
     ocache.expire();
-    EXPECT_EQ(0, ocache._set.size());
+    EXPECT_EQ(0UL, ocache._set.size());
 }
 
 TEST(ObjectCache, multithread) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -249,7 +244,7 @@ struct OCArg2 {
 void* objcache_borrow_once(void* arg) {
     auto args = (OCArg2*)arg;
     auto oc = args->oc;
-    auto id = args->id;
+    // auto id = args->id;
     auto& count = *args->count;
     auto ctor = [&]() {
         // failed after 1s;
@@ -291,9 +286,116 @@ TEST(ObjectCache, borrow_with_once) {
     EXPECT_EQ(2, count.load());
 }
 
+struct OCArgV2 {
+    ObjectCacheV2<int, ShowOnDtor*>* oc;
+    int id;
+    std::atomic<int>* count;
+};
+void* objcache_borrow_v2(void* arg) {
+    auto args = (OCArgV2*)arg;
+    auto oc = args->oc;
+    auto id = args->id;
+    auto ctor = [&]() { return new ShowOnDtor(id); };
+    // acquire every 10ms
+    photon::thread_usleep(10 * 1000UL * id);
+    {
+        auto ret = oc->borrow(0, ctor);
+        LOG_DEBUG("Acquired ", VALUE(id));
+        EXPECT_TRUE(ret);
+        // object holds for 50ms
+        photon::thread_usleep(50 * 1000UL);
+        if (id % 10 == 0) {
+            LOG_INFO("Cycle ", VALUE(id));
+            ret.recycle(true);
+        }
+    }
+    // every 10 objs will recycle
+    if (id % 10 == 0) cycle_cnt++;
+    LOG_DEBUG("Released ", VALUE(id));
+    return 0;
+}
+
+
+TEST(ObjectCacheV2, borrow) {
+    set_log_output_level(ALOG_INFO);
+    DEFER(set_log_output_level(ALOG_DEBUG));
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    cycle_cnt = 0;
+    release_cnt = 0;
+    // 10s, during the test, nothing will be free if not set recycle
+    std::vector<std::thread> ths;
+    for (int i = 0; i < 10; i++) {
+        ths.emplace_back([&] {
+            photon::vcpu_init();
+            DEFER(photon::vcpu_fini());
+            std::vector<photon::join_handle*> handles;
+            std::vector<OCArgV2> args;
+            for (int i = 0; i < 100; i++) {
+                args.emplace_back(OCArgV2({&ocache, i + 1}));
+            }
+            for (auto& arg : args) {
+                handles.emplace_back(photon::thread_enable_join(
+                    photon::thread_create(&objcache_borrow_v2, &arg)));
+            }
+            for (const auto& handle : handles) {
+                photon::thread_join(handle);
+            }
+        });
+    }
+    for (auto& x : ths) {
+        x.join();
+    }
+
+    EXPECT_EQ(cycle_cnt, release_cnt);
+}
+
+void* objcache_borrow_once_v2(void* arg) {
+    auto args = (OCArgV2*)arg;
+    auto oc = args->oc;
+    // auto id = args->id;
+    auto& count = *args->count;
+    auto ctor = [&]()->ShowOnDtor* {
+        // failed after 1s;
+        photon::thread_usleep(1000 * 1000UL);
+        count++;
+        return nullptr;
+    };
+    auto ret = oc->borrow(0, ctor, 1000UL * 1000);
+    (void)ret;
+    // every 10 objs will recycle
+    return 0;
+}
+
+TEST(ObjectCacheV2, borrow_with_once) {
+    set_log_output_level(ALOG_INFO);
+    DEFER(set_log_output_level(ALOG_DEBUG));
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    cycle_cnt = 0;
+    release_cnt = 0;
+    std::atomic<int> count(0);
+    // 10s, during the test, nothing will be free if not set recycle
+    std::vector<photon::join_handle*> handles;
+    std::vector<OCArgV2> args;
+    for (int i = 0; i < 100; i++) {
+        args.emplace_back(OCArgV2{&ocache, i + 1, &count});
+    }
+    for (auto& arg : args) {
+        handles.emplace_back(photon::thread_enable_join(
+            photon::thread_create(&objcache_borrow_once_v2, &arg)));
+    }
+    for (const auto& handle : handles) {
+        photon::thread_join(handle);
+    }
+    EXPECT_EQ(1, count.load());
+    ocache.borrow(0, [&] {
+        photon::thread_usleep(1000 * 1000UL);
+        count++;
+        return new ShowOnDtor(1);
+    });
+    EXPECT_EQ(2, count.load());
+}
+
 TEST(ExpireContainer, expire_container) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     char key2[10] = "hello";
     ExpireContainer<std::string, int, bool> expire(1000 *
@@ -334,8 +436,6 @@ TEST(ExpireContainer, refresh) {
 }
 
 TEST(ExpireList, expire_container) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     ExpireList<std::string> expire(1000 * 1000);  // expire in 100ms
     expire.keep_alive(key, true);
@@ -393,7 +493,53 @@ TEST(ObjCache, with_list) {
     }
 }
 
+TEST(ObjectCache, no_destroy) {
+    ObjectCache<int, int*> oc(1000UL * 1000);
+    int* ptr = nullptr;
+    auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.acquire(0, [] { return new int(1); });
+        ptr = a;
+        photon::thread_yield();
+        auto x = oc.release(0, true, false);
+        EXPECT_EQ(x, a);
+    }));
+    auto th2 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.acquire(0, [] { return new int(2); });
+        EXPECT_EQ(a, ptr);
+        photon::thread_yield();
+        auto x = oc.release(0);
+        EXPECT_EQ(nullptr, x);
+    }));
+    photon::thread_join(th1);
+    photon::thread_join(th2);
+    auto x = oc.acquire(0, [] { return new int(3);});
+    EXPECT_EQ(3, *x);
+    oc.release(0);
+}
+TEST(ObjectCache, movedout) {
+    ObjectCache<int, int*> oc(1000UL * 1000);
+    int* ptr = nullptr;
+    auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.borrow(0, [] { return new int(1); });
+        ptr = &*a;
+        photon::thread_yield();
+        a.recycle(true);
+        a.moveout(true);
+        EXPECT_TRUE(a.moved());
+    }));
+    auto th2 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.borrow(0, [] { return new int(2); });
+        EXPECT_EQ(ptr, &*a);
+        photon::thread_yield();
+    }));
+    photon::thread_join(th1);
+    photon::thread_join(th2);
+    auto x = oc.borrow(0, [] { return new int(3);});
+    EXPECT_EQ(3, *x);
+}
+
 int main(int argc, char** argv) {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);

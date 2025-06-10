@@ -16,7 +16,9 @@ limitations under the License.
 
 #pragma once
 
+#include <photon/common/estring.h>
 #include <photon/common/string_view.h>
+#include <photon/common/hash_combine.h>
 #include <cstring>
 #include <unordered_map>
 #include <map>
@@ -156,6 +158,40 @@ template<class T,
 using unordered_map_string_key = basic_map_string_key<
     std::unordered_map<string_key, T, Hasher, KeyEqual, Alloc>>;
 
+class Hasher_CaseInsensitive {
+    constexpr static size_t BUF_CAP() { return 64; }
+    size_t partial_hash(std::string_view sv) const {
+        char buf[BUF_CAP()];
+        assert(sv.size() <= BUF_CAP());
+        photon::tolower_fast(buf, sv.data(), sv.size());
+        return std::hash<std::string_view>()({buf, sv.size()});
+    }
+public:
+    size_t operator()(std::string_view sv) const {
+        size_t h = 0;
+        for (size_t i = 0; i < sv.size(); i += BUF_CAP()) {
+            auto len = std::min(BUF_CAP(), sv.size() - i);
+            auto ph = partial_hash(sv.substr(i, len));
+            h = photon::hash_combine(h, ph);
+        }
+        return h;
+    }
+};
+
+class Equal_CaseInsensitive {
+public:
+    bool operator()(std::string_view a, std::string_view b) const {
+        return a.size() == b.size() && photon::stricmp_fast(a, b) == 0;
+    }
+};
+
+template<class T,
+    class Hasher = Hasher_CaseInsensitive,
+    class KeyEqual = Equal_CaseInsensitive,
+    class Alloc = std::allocator<std::pair<const string_key, T>>>
+using unordered_map_string_key_case_insensitive = basic_map_string_key<
+    std::unordered_map<string_key, T, Hasher, KeyEqual, Alloc>>;
+
 template<class T,
     class Pred = std::less<string_key>,
     class Alloc = std::allocator<std::pair<const string_key,T>>>
@@ -188,6 +224,23 @@ public:
         return base::upper_bound((const string_key&)k);
     }
 };
+
+class Less_CaseInsensitive {
+public:
+    bool operator()(std::string_view a, std::string_view b) const {
+        auto len = std::min(a.size(), b.size());
+        auto cmp = strncasecmp(a.begin(), b.begin(), len);
+        if (cmp < 0) return true;
+        if (cmp > 0) return false;
+        return a.size() < b.size();
+    }
+};
+
+template<class T,
+    class Pred = Less_CaseInsensitive,
+    class Alloc = std::allocator<std::pair<const string_key,T>>>
+using map_string_key_case_insensitive = basic_map_string_key<
+    std::map<string_key, T, Pred, Alloc>>;
 
 // the String Key-Value (Mutable), stored together
 // in a consecutive area, so as to save one allocation
@@ -264,6 +317,10 @@ public:
         mutable bool _has_val = false;
 
         iterator(base_it b_it) : _b_it(b_it) { }
+        iterator(typename base::const_iterator b_it) {
+            auto x = (base_it*) &b_it;
+            _b_it = *x;
+        }
 
         mutable_value_type& _init_val() const {
             if (_has_val) return _val;
@@ -321,11 +378,9 @@ public:
     {
         return base::begin();
     }
-    using B_IT = typename base::iterator;
     const_iterator end() const
     {
-        auto it = base::end();
-        return (B_IT&)it;
+        return {base::end()};
     }
     iterator end()
     {
@@ -353,13 +408,11 @@ public:
     }
     const_iterator find ( const key_type& k ) const
     {
-        auto it = base::find((const skvm&)k);
-        return (B_IT&)it;
+        return {base::find((const skvm&)k)};
     }
     iterator find ( const key_type& k )
     {
-        auto it = base::find((const skvm&)k);
-        return (B_IT&)it;
+        return {base::find((const skvm&)k)};
     }
     size_type count ( const key_type& k ) const
     {
@@ -367,8 +420,7 @@ public:
     }
     std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
     {
-        auto r = base::equal_range((const skvm&)k);
-        return {(B_IT&) r.first, (B_IT&) r.second};
+        return {base::equal_range((const skvm&)k)};
     }
     std::pair<iterator, bool> emplace (const key_type& k, const mapped_type& v )
     {
@@ -419,9 +471,16 @@ public:
 using unordered_map_string_kv = basic_map_string_kv<std::unordered_map<
     skvm, size_t, std::hash<std::string_view>>>;
 
-class map_string_kv : public basic_map_string_kv<std::map<skvm, size_t>> {
+using unordered_map_string_kv_case_insensitive = basic_map_string_kv<
+    std::unordered_map<skvm, size_t, Hasher_CaseInsensitive,
+            Equal_CaseInsensitive>>;
+
+template<class Compare = std::less<skvm>, class Allocator =
+                std::allocator<std::pair<const skvm, size_t>>>
+class __basic_map_string_kv : public basic_map_string_kv<
+         std::map<skvm, size_t, Compare, Allocator>> {
 public:
-    using base = basic_map_string_kv<std::map<skvm, size_t>>;
+    using base = basic_map_string_kv<std::map<skvm, size_t, Compare, Allocator>>;
     using typename base::key_type;
     using typename base::const_iterator;
     using typename base::iterator;
@@ -437,18 +496,18 @@ public:
     {
         return base::upper_bound((const skvm&)k);
     }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-    using typename base::B_IT;
     const_iterator lower_bound (const key_type& k) const
     {
-        auto it = base::lower_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::lower_bound((const skvm&)k)};
     }
     const_iterator upper_bound (const key_type& k) const
     {
-        auto it = base::upper_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::upper_bound((const skvm&)k)};
     }
-#pragma GCC diagnostic pop
 };
+
+using map_string_kv = __basic_map_string_kv<>;
+
+using map_string_kv_case_insensitive =
+    __basic_map_string_kv<Less_CaseInsensitive>;
+

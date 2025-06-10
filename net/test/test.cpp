@@ -15,17 +15,19 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <sys/stat.h>
-
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
+#ifdef ENABLE_CURL
 #include <photon/net/curl.h>
+#endif
 #include <photon/net/utils.h>
 #include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../../test/gtest.h"
 
 #define protected public
 #define private public
@@ -121,7 +123,7 @@ void tcp_client() {
     LOG_DEBUG(VALUE(sock), VALUE(errno));
     EndPoint epget = sock->getpeername();
     LOG_DEBUG("Connected `", epget);
-    EXPECT_TRUE(ep.port = epget.port);
+    EXPECT_EQ(ep.port, epget.port);
     char buff[] = "Hello";
     char recv[256];
     sock->send("Hello", 5);
@@ -170,8 +172,8 @@ public:
     }
     int get_log_file_fd() override { return -1; }
 
-    uint64_t set_throttle(uint64_t) { return -1; }
-    uint64_t get_throttle() { return -1; }
+    uint64_t set_throttle(uint64_t) override { return -1; }
+    uint64_t get_throttle() override { return -1; }
 
     void destruct() override {}
 } log_output_test;
@@ -187,7 +189,8 @@ TEST(Socket, endpoint) {
 
     photon::net::sockaddr_storage s(saddrin);
     ep = s.to_endpoint();
-    EXPECT_TRUE(ep == EndPoint(IPAddr("12.34.56.78"), 4321));
+    IPAddr addr12345678("12.34.56.78");
+    EXPECT_TRUE(ep == EndPoint(addr12345678, 4321));
 
     auto rsai = (sockaddr_in*) s.get_sockaddr();
     EXPECT_EQ(saddrin.sin_addr.s_addr, rsai->sin_addr.s_addr);
@@ -200,6 +203,18 @@ TEST(Socket, endpoint) {
     LOG_DEBUG(ep.addr);
     EXPECT_NE(nullptr, strstr(log_output_test._log_buf, "12.34.56.78"));
     log_output = log_output_stdout;
+
+    EndPoint epfsv1("12.34.56.78:4321"), epfsv2("12.34.56.78", 4321);
+    EXPECT_EQ(epfsv1.addr, addr12345678);
+    EXPECT_EQ(epfsv1.port, 4321);
+    EXPECT_EQ(epfsv1, epfsv2);
+
+    std::vector<EndPoint> addrs;
+    parse_address_list("1.1.1.1:1,2.2.2.2:2,3.3.3.3:3,4.4.4.4", &addrs, 4);
+    EXPECT_EQ(addrs[0], EndPoint("1.1.1.1:1"));
+    EXPECT_EQ(addrs[1], EndPoint("2.2.2.2:2"));
+    EXPECT_EQ(addrs[2], EndPoint("3.3.3.3:3"));
+    EXPECT_EQ(addrs[3], EndPoint("4.4.4.4:4"));
 }
 
 TEST(Socket, timeout) {
@@ -576,7 +591,7 @@ bool server_down = false;
 photon::thread* server_thread = nullptr;
 
 void* serve_connection(void* arg) {
-    auto fd = (int&)arg;
+    auto fd = (int)(uint64_t)arg;
     while (true) {
         char buf[1024];
         auto ret = net::read(fd, buf, sizeof(buf));
@@ -687,6 +702,7 @@ void test_writer(Writer& writer) {
     EXPECT_EQ(0, strncmp("123456", writer.alog_string().s, 6));
 }
 
+#ifdef ENABLE_CURL
 TEST(writers, multiple_segment) {
     StringWriter sw;
     test_writer(sw);
@@ -696,6 +712,7 @@ TEST(writers, multiple_segment) {
     BufferWriter<256> bfw;
     test_writer(bfw);
 }
+#endif
 
 void* start_server(void*) {
     test_socket_server();
@@ -725,14 +742,30 @@ TEST(utils, gethostbyname) {
 TEST(utils, resolver) {
     auto *resolver = new_default_resolver();
     DEFER(delete resolver);
-    net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    if (addr.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr.to_nl());
-    auto func = [&](net::IPAddr addr_){
-        if (addr_.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
+    if (addr.is_ipv4()) {
+        EXPECT_EQ(net::IPAddr::V4Loopback(), addr);
+    } else {
+        EXPECT_EQ(net::IPAddr::V6Loopback(), addr);
+    }
+}
+
+TEST(utils, resolver_filter) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    auto filter = [&](net::IPAddr addr_) -> bool {
+        return !addr_.is_ipv4();
     };
-    resolver->resolve("localhost", func);
+    auto addr = resolver->resolve_filter("localhost", filter);
+    ASSERT_TRUE(!addr.is_ipv4());
+}
+
+TEST(utils, resolver_discard) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    (void) resolver->resolve("localhost");
     resolver->discard_cache("non-exist-host.com");
+    resolver->discard_cache("localhost");
 }
 
 #ifdef __linux__

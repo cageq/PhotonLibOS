@@ -16,6 +16,7 @@ limitations under the License.
 #include "../extfs.h"
 #include <fcntl.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <utime.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
@@ -27,11 +28,13 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
+#include "photon/common/utility.h"
 
 #define FILE_SIZE (2 * 1024 * 1024)
 
 void print_stat(const char *path, struct stat *st) {
+/*
     printf("File: %s\n", path);
     printf("Size: %d, Blocks: %d, IO Blocks: %d, Type: %d\n", st->st_size, st->st_blocks, st->st_blksize, IFTODT(st->st_mode));
     printf("Device: %u/%u, Inode: %d, Links: %d, Device type: %u,%u\n",
@@ -40,6 +43,16 @@ void print_stat(const char *path, struct stat *st) {
     printf("Access: %s", asctime(localtime(&(st->st_atim.tv_sec))));
     printf("Modify: %s", asctime(localtime(&(st->st_mtim.tv_sec))));
     printf("Change: %s", asctime(localtime(&(st->st_ctim.tv_sec))));
+*/
+#define KV(k, v) make_named_value(#k, v)
+    LOG_INFO(VALUE(path));
+    LOG_INFO(KV(Size, st->st_size), KV(Blocks, st->st_blocks), KV(BlkSize, st->st_blksize), KV(Type, IFTODT(st->st_mode)));
+    LOG_INFO(KV(Device, HEX(st->st_dev)), KV(Inode, st->st_ino), KV(nLinks, st->st_nlink));
+    LOG_INFO(KV(Access, OCT(st->st_mode & 0xFFF)), KV(Uid, st->st_uid), KV(Gid, st->st_gid));
+    LOG_INFO(KV(AccessTime, asctime(localtime(&(st->st_atim.tv_sec)))));
+    LOG_INFO(KV(ModifyTime, asctime(localtime(&(st->st_mtim.tv_sec)))));
+    LOG_INFO(KV(ChangeTime, asctime(localtime(&(st->st_ctim.tv_sec)))));
+#undef KV
 }
 
 photon::fs::IFile *new_file(photon::fs::IFileSystem *fs, const char *path) {
@@ -368,7 +381,8 @@ photon::fs::IFileSystem *init_extfs() {
         delete image_file;
         LOG_ERRNO_RETURN(0, nullptr, "failed open extfs");
     }
-
+    auto underlay_file = (photon::fs::IFile*)(extfs->get_underlay_object());
+    EXPECT_EQ(underlay_file, image_file);
     return extfs;
 }
 class ExtfsTest : public ::testing::Test {
@@ -979,6 +993,19 @@ TEST_F(ExtfsTest, Xattr) {
     ret = removexattr(xattr_fs, "/test_xattr2", "user.test1");
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ENOENT, errno);
+}
+
+
+TEST_F(ExtfsTest, InvalidFs) {
+    std::string rootfs = "/tmp/invalid_fs.img";
+    auto file = photon::fs::open_localfile_adaptor(rootfs.c_str(), O_CREAT|O_TRUNC|O_RDWR, 0666);
+    EXPECT_NE(nullptr, file);
+    DEFER({
+        delete file;
+        ::unlink(rootfs.c_str());
+    });
+    auto err_fs = photon::fs::new_extfs(file, false);
+    EXPECT_EQ(err_fs, nullptr);
 }
 
 int main(int argc, char **argv) {

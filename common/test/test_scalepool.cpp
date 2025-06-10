@@ -22,9 +22,10 @@ limitations under the License.
 #undef protected
 
 #include "../alog.h"
-#include <gtest/gtest.h>
-#include <photon/thread/thread.h>
 #include <vector>
+#include <photon/thread/thread.h>
+#include "../../test/ci-tools.h"
+#include "../../test/gtest.h"
 
 TEST(IdentityPoolGC, basic) {
     auto pool = new_identity_pool<int>(128);
@@ -112,17 +113,18 @@ TEST(IOAlloc, basic) {
     for (auto &x:mem) {
         alloc.dealloc(x);
     }
-    while (mpool.slots[mpool.get_slot(64*1024, true)].m_size < 32) {
+    while (mpool.slots[mpool.get_slot(64*1024)].m_size < 32) {
         photon::thread_usleep(1000);
     }
-    while (mpool.slots[mpool.get_slot(64*1024, true)].m_size > 0) {
+    while (mpool.slots[mpool.get_slot(64*1024)].m_size > 0) {
         photon::thread_usleep(1000 * 1000);
-        LOG_DEBUG(VALUE(mpool.slots[mpool.get_slot(64*1024, true)].m_size));
+        LOG_DEBUG(VALUE(mpool.slots[mpool.get_slot(64*1024)].m_size));
     }
-    EXPECT_EQ(0U, mpool.slots[mpool.get_slot(64*1024, true)].m_size);
+    EXPECT_EQ(0U, mpool.slots[mpool.get_slot(64*1024)].m_size);
 }
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());

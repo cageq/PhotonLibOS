@@ -7,76 +7,106 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  centos8-gcc921-epoll-release:
+  arm-linux-build-and-test:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
-      image: dokken/centos-stream-8:sha-40294ce
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4
 
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install Dependencies
-        run: |
-          dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
-          dnf install -y gcc-toolset-9-gcc-c++
-          dnf install -y openssl-devel libcurl-devel libaio-devel
-          dnf install -y epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
-
-      - name: Build
+      - name: Build-Debug-921-C++14
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -- VERBOSE=1
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-921-C++17
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=17        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-1121-C++20
+        run: |
+          source /opt/rh/gcc-toolset-11/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=20        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-1211-C++23
+        run: |
+          source /opt/rh/gcc-toolset-12/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=23        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test
         run: |
           cd build
+          nohup redis-server &
           ctest --timeout 3600 -V
+          pkill redis-server
 
-  centos8-gcc921-epoll-debug:
-    runs-on: [self-hosted, Linux, ARM64]
-
+  debug-build-from-source:
+    runs-on: ubuntu-latest
     container:
-      image: dokken/centos-stream-8:sha-40294ce
-      options: --cpus 4
-
+      image: almalinux:8
     steps:
-      - uses: szenius/set-timezone@v1.2
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-
-      - uses: actions/checkout@v3
-
-      - name: Install Dependencies
-        run: |
-          dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
-          dnf install -y gcc-toolset-9-gcc-c++
-          dnf install -y openssl-devel libcurl-devel libaio-devel
-          dnf install -y epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
-
+      - uses: actions/checkout@v4
       - name: Build
         run: |
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled powertools
+          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=Debug -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -- VERBOSE=1
-
-      - name: Test
-        run: |
-          cd build
-          ctest --timeout 3600 -V
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
+                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_ENABLE_SASL=OFF        \
+                         -D PHOTON_ENABLE_FUSE=OFF        \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=OFF     \
+                         -D PHOTON_ENABLE_EXTFS=OFF
+          cmake --build build -j $(nproc)

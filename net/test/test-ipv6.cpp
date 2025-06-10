@@ -1,21 +1,23 @@
 #include <vector>
-#include <gtest/gtest.h>
-
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils.h>
 #include <photon/common/alog.h>
+#include "../../test/gtest.h"
 
 TEST(ipv6, endpoint) {
     auto c = photon::net::EndPoint("127.0.0.1");
     EXPECT_TRUE(c.undefined()); // must have ':port' included
+    c = photon::net::EndPoint::parse("127.0.0.1", 1234);
+    EXPECT_FALSE(c.undefined());
+    EXPECT_EQ(c.port, 1234);
     c = photon::net::EndPoint("127.0.0.1:8888");
     EXPECT_FALSE(c.undefined());
     c = photon::net::EndPoint("[::1]:8888");
     EXPECT_FALSE(c.undefined());
     c = photon::net::EndPoint("0.0.0.0:8888");
-    EXPECT_TRUE(c.undefined());
+    EXPECT_FALSE(c.undefined());
     EXPECT_EQ(8888, c.port);
     c = photon::net::EndPoint("::", 8888);
     EXPECT_TRUE(!c.undefined());
@@ -88,7 +90,7 @@ TEST(ipv6, dns_lookup) {
 class DualStackTest : public ::testing::Test {
 public:
     void run() {
-        auto server = photon::net::new_tcp_socket_server_ipv6();
+        auto server = photon::net::new_tcp_socket_server();
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
 

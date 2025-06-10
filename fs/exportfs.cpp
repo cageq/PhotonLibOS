@@ -142,8 +142,13 @@ namespace fs
     __attribute__((visibility("hidden"))) Delegate<void> ExportBase::op;
     __attribute__((visibility("hidden"))) ThreadPoolBase* ExportBase::pool = nullptr;
 
+#if __cplusplus > 202000L
+#define PERFORM(ID, expr) \
+    perform(timeout, new auto([=, this]() { do_callback(ID, expr, done); }));
+#else
 #define PERFORM(ID, expr) \
     perform(timeout, new auto([=]() { do_callback(ID, expr, done); }));
+#endif
 
     class ExportAsAsyncFile : public ExportBase, public IAsyncFile, public IAsyncFileXAttr
     {
@@ -240,6 +245,10 @@ namespace fs
         OVERRIDE_ASYNC(ssize_t, do_appendv, const struct iovec* iov, int iovcnt, off_t* offset, off_t* position)
         {
             PERFORM(OPID_APPENDV, m_file->do_appendv(iov, iovcnt, offset, position));
+        }
+        OVERRIDE_ASYNC(int, fallocate, int mode, off_t offset, off_t len)
+        {
+            PERFORM(OPID_FALLOCATE, m_file->fallocate(mode, offset, len));
         }
         OVERRIDE_ASYNC(ssize_t, fgetxattr, const char *name, void *value, size_t size)
         {
@@ -561,6 +570,7 @@ namespace fs
         ExportBase::ref = 1;
         if (thread_pool_capacity != 0) ExportBase::pool = new_thread_pool(thread_pool_capacity);
         evloop->async_run();
+        LOG_INFO(" OK");
         return 0;
     }
     int exportfs_fini()

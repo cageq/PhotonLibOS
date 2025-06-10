@@ -488,7 +488,11 @@ struct LogBuilder {
                                 ALOG_TEMP, __VA_ARGS__); \
         errno = _err_bak;                                \
     }
+#ifndef DISABLE_AUDIT
 #define LOG_AUDIT(...) (__LOG__((), default_audit_logger, ALOG_AUDIT, __VA_ARGS__))
+#else
+#define LOG_AUDIT(...)
+#endif
 
 inline void set_log_output(ILogOutput* output) {
     default_logger.log_output = output;
@@ -509,19 +513,19 @@ struct ERRNO
 
 LogBuffer& operator << (LogBuffer& log, ERRNO e);
 
-inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
+inline LogBuffer& operator << (LogBuffer& log, const photon::reterr& rvb) {
     auto x = rvb._errno;
     return x ? (log << ERRNO((int)x)) : log;
 }
 
 template<typename T> inline
 LogBuffer& operator << (LogBuffer& log, const photon::retval<T>& v) {
-    return v.succeeded() ? (log << v.get()) : (log << v.base());
+    return v.succeeded() ? (log << v.get()) : (log << v.error());
 }
 
 template<> inline
 LogBuffer& operator << <void> (LogBuffer& log, const photon::retval<void>& v) {
-    return log << v.base();
+    return log << v.error();
 }
 
 template<typename T>
@@ -569,17 +573,14 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     return retv;                                    \
 }
 
+// err can be either an error number of int, or an retval<T>
 #define LOG_ERROR_RETVAL(err, ...) do {             \
-    if (std::is_same<decltype(err), int>::value) {  \
-        retval_base e{err};                         \
-        assert(e.failed());                         \
-        LOG_ERROR(__VA_ARGS__, ' ', e);             \
-        return e;                                   \
-    } else {                                        \
-        LOG_ERROR(__VA_ARGS__);                     \
-        return err;                                 \
-    }                                               \
+    reterr e{err};                                  \
+    LOG_ERROR(__VA_ARGS__, ' ', e);                 \
+    return e;                                       \
 } while(0)
+
+#define LOG_ERRNO_RETVAL(...) LOG_ERROR_RETVAL(errno, __VA_ARGS__)
 
 // Acts like a LogBuilder
 // but able to do operations when log builds
@@ -591,8 +592,8 @@ struct __LogAppender : public Builder {
     using Builder::logger;
     using Builder::done;
     Append append;
-    explicit __LogAppender(Builder&& rhs, Append&& append)
-        : Builder(std::move(rhs)), append(std::move(append)) {}
+    explicit __LogAppender(Builder&& rhs, Append&& append_)
+        : Builder(std::move(rhs)), append(std::move(append_)) {}
     __LogAppender(__LogAppender&& rhs)
         : Builder(std::move(rhs)), append(std::move(rhs.append)) {}
     ~__LogAppender() {
@@ -617,7 +618,7 @@ struct __limit_first_n {
     uint64_t count = 0;
     bool operator()() { return (++count) > N; }
     void reset() { count = 0; }
-    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>\n"; }
 };
 
 template <uint64_t N>
@@ -625,7 +626,7 @@ struct __limit_every_n {
     uint64_t count = 0;
     bool operator()() { return ((++count) % N) != 1; }
     void reset() { count = 0; }
-    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>\n"; }
 };
 
 template <time_t T>
@@ -645,7 +646,7 @@ struct __limit_every_t {
     void reset() { last = 0; }
     void append_tail(LogBuffer& buffer) {
         if (duration)
-            buffer << " <last log " << duration << " sec>";
+            buffer << " <last log " << duration << " sec>\n";
         duration = 0;
     }
 };
@@ -668,7 +669,7 @@ struct __limit_first_n_every_t {
     }
     void append_tail(STFMTLogBuffer& buffer) {
         if (cnt) {
-            buffer << " <" << cnt << " log(s) in " << T << " sec>";
+            buffer << " <" << cnt << " log(s) in " << T << " sec>\n";
             cnt = 0;
         }
     }
